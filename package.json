@@ -1,0 +1,15 @@
+{
+  "name": "pdf-to-epub-converter",
+  "version": "1.0.0",
+  "description": "Convert PDF files to reflowable EPUB books in the browser, with inverted colours and reflowing text zoom.",
+  "private": true,
+  "type": "module",
+  "bin": { "pdf-to-epub": "cli.mjs" },
+  "scripts": {
+    "convert": "node cli.mjs",
+    "start": "python3 -m http.server 8000"
+  },
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}
