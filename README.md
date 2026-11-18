@@ -27,8 +27,26 @@ EPUB has real reflowable text:
 - **Pictures** are kept as sharp images, cropped from a high-resolution render of the page. Page 1 becomes the cover.
 - **Right-to-left PDFs** (Hebrew, Arabic) come out in correct reading order, with RTL page progression.
 - Rotated pages and password-protected PDFs work.
-- **Scanned pages** have no text to reflow, so they are kept as full-page pictures and the app warns you.
-  Run such PDFs through OCR first.
+- **Scanned PDFs are read with OCR** (see below), so they also become real, reflowable text.
+
+## Text recognition (OCR)
+
+Scanned pages have no text layer, only a picture of the page. The converter reads them with
+[Tesseract](https://github.com/tesseract-ocr/tesseract) (via Tesseract.js, running in the browser), at about 300 dpi:
+
+- **Scanned pages only** (default) reads only pages without a text layer. **All pages** ignores the PDF's own text,
+  which helps with PDFs whose text layer is garbled. **Off** keeps scanned pages as pictures.
+- **Languages:** tick the languages the book uses: English, Hebrew, Arabic, Russian, Ukrainian, French, German,
+  Spanish, Italian, Portuguese, Dutch, Polish, Turkish, Greek, Yiddish, Hindi, Chinese, Japanese and Korean. The
+  default follows your browser's language. Each language model (1–15 MB) downloads once from jsDelivr and is then
+  cached. The PDF itself never leaves your device.
+- Recognised pages go through the same rebuilding as text PDFs: paragraphs, headings, chapters, header and footer
+  removal, and re-joined hyphenation. **Columns** are detected even when the gutter is narrow, and Tesseract on its
+  own would mix them. **Pictures** on scanned pages are found and cropped, and stray "text" read inside them is
+  dropped.
+- The app shows how many pages were read with OCR and the average confidence. Low confidence usually means the
+  wrong languages are ticked or the scan is low resolution.
+- OCR does not detect bold or italic, and the quality depends on the scan. 300 dpi scans work best.
 
 ## Inverted colours and reflowing zoom
 
@@ -52,18 +70,23 @@ npm install && npx playwright install chromium
 node cli.mjs book.pdf -o book.epub --invert --text-size 120%
 ```
 
+OCR options: `--ocr auto|all|off` and `--lang heb+eng`. For fully offline use, put `<lang>.traineddata.gz` files
+in a folder and pass `--lang-dir <folder>`; they are available from the `@tesseract.js-data/<lang>` npm packages,
+in the `4.0.0_best_int` folder.
+
 Run `node cli.mjs --help` for every option.
 
 ## Files
 
 | File | |
 |---|---|
-| `pdf-extract.js` | reads the PDF with pdf.js: lines with positions, sizes and styles; pictures; bookmarks |
+| `pdf-extract.js` | reads the PDF with pdf.js (lines with positions, sizes and styles; pictures; bookmarks), and runs OCR on scanned pages |
 | `structure.js` | rebuilds paragraphs, headings and chapters, and removes headers and footers (no DOM, so it re-runs instantly) |
 | `epub-build.js` | writes the EPUB 3 file (with an EPUB 2 NCX table of contents for older readers) |
 | `reader.js` | the paginated EPUB preview (colour themes, reflowing zoom) |
 | `app.js`, `index.html`, `style.css` | the web app |
 | `cli.mjs`, `engine.html` | the command-line converter |
+| `vendor/tesseract/` | [Tesseract.js](https://tesseract.projectnaptha.com/) 6.0.1 + core 6.0.0 (Apache-2.0) for OCR |
 | `vendor/pdfjs/` | [pdf.js](https://mozilla.github.io/pdf.js/) 4.10.38 (Apache-2.0) |
 | `vendor/jszip.min.js` | [JSZip](https://stuk.github.io/jszip/) 3.10.1 (MIT) |
 | `.github/workflows/pages.yml` | publishes the app to GitHub Pages on every push to `main` |

@@ -30,6 +30,7 @@
         <label class="field">Author <input type="text" id="author"></label>
         <p class="stats" id="stats"></p>
         <p class="warn" id="scanWarn" hidden></p>
+        <p class="ok" id="ocrInfo" hidden></p>
       </section>
 
       <section>
@@ -81,6 +82,41 @@
         <label class="check"><input type="checkbox" id="justify"> Justify paragraphs</label>
         <label class="check"><input type="checkbox" id="bake" checked> Save colours, text size and font into the EPUB</label>
         <p class="hint">Some readers (Kindle, Apple Books) apply their own colours on top. Their night mode then does the inverting.</p>
+      </section>
+
+      <section>
+        <h2>Text recognition (OCR)</h2>
+        <label class="field">Read text from the page images
+          <select id="ocrMode">
+            <option value="auto">Scanned pages only</option>
+            <option value="all">All pages (ignore the PDF's text)</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+        <fieldset class="langs" id="ocrLangs">
+          <legend>Languages in the book</legend>
+          <label><input type="checkbox" value="eng"> English</label>
+          <label><input type="checkbox" value="heb"> עברית</label>
+          <label><input type="checkbox" value="ara"> العربية</label>
+          <label><input type="checkbox" value="rus"> Русский</label>
+          <label><input type="checkbox" value="ukr"> Українська</label>
+          <label><input type="checkbox" value="fra"> Français</label>
+          <label><input type="checkbox" value="deu"> Deutsch</label>
+          <label><input type="checkbox" value="spa"> Español</label>
+          <label><input type="checkbox" value="ita"> Italiano</label>
+          <label><input type="checkbox" value="por"> Português</label>
+          <label><input type="checkbox" value="nld"> Nederlands</label>
+          <label><input type="checkbox" value="pol"> Polski</label>
+          <label><input type="checkbox" value="tur"> Türkçe</label>
+          <label><input type="checkbox" value="ell"> Ελληνικά</label>
+          <label><input type="checkbox" value="yid"> ייִדיש</label>
+          <label><input type="checkbox" value="hin"> हिन्दी</label>
+          <label><input type="checkbox" value="chi_sim"> 简体中文</label>
+          <label><input type="checkbox" value="chi_tra"> 繁體中文</label>
+          <label><input type="checkbox" value="jpn"> 日本語</label>
+          <label><input type="checkbox" value="kor"> 한국어</label>
+        </fieldset>
+        <p class="hint">Tick only the languages the book uses: extra languages make recognition slower and less accurate. Each language model (1–15 MB) downloads once and is then cached; your PDF never leaves your device.</p>
       </section>
 
       <section>

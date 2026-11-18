@@ -20,7 +20,15 @@
 
   // ---- settings ---------------------------------------------------------------------------------------------
   const CONVERSION_KEYS = ['removeHeadersFooters', 'joinHyphens', 'detectHeadings', 'useOutline', 'keepImages'];
-  const settings = Object.assign({}, R.DEFAULTS, PdfStructure.DEFAULTS, { includeCover: true, bake: true });
+  // OCR language guessed from the browser's language; the reader can tick more
+  const UI_LANG_TO_OCR = {
+    he: 'heb', iw: 'heb', ar: 'ara', ru: 'rus', uk: 'ukr', fr: 'fra', de: 'deu', es: 'spa', it: 'ita', pt: 'por',
+    nl: 'nld', pl: 'pol', tr: 'tur', el: 'ell', yi: 'yid', hi: 'hin', ja: 'jpn', ko: 'kor',
+  };
+  const uiLang = (navigator.language || 'en').toLowerCase();
+  const defaultOcrLang = /^zh-(tw|hk|mo|hant)/.test(uiLang) ? 'chi_tra' : uiLang.startsWith('zh') ? 'chi_sim'
+    : (UI_LANG_TO_OCR[uiLang.split('-')[0]] || 'eng');
+  const settings = Object.assign({}, R.DEFAULTS, PdfStructure.DEFAULTS, { includeCover: true, bake: true, ocrMode: 'auto', ocrLangs: defaultOcrLang });
   try { Object.assign(settings, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); } catch (_) { /* private mode */ }
   const saveSettings = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); } catch (_) { /* ignore */ } };
 
@@ -46,6 +54,10 @@
     $('bake').checked = settings.bake;
     $('includeCover').checked = settings.includeCover;
     for (const k of CONVERSION_KEYS) $(k).checked = settings[k];
+    $('ocrMode').value = settings.ocrMode;
+    const langs = settings.ocrLangs.split('+');
+    for (const cb of $('ocrLangs').querySelectorAll('input')) cb.checked = langs.includes(cb.value);
+    $('ocrLangs').disabled = settings.ocrMode === 'off';
   }
 
   // Appearance change: restyle the preview in place and keep the reader on the same passage.
@@ -209,7 +221,12 @@
       `${n(s.paragraphs, 'paragraph')}, ${n(s.images, 'picture')}`;
     $('scanWarn').hidden = !s.scannedPages;
     $('scanWarn').textContent = s.scannedPages
-      ? `${s.scannedPages} page${s.scannedPages > 1 ? 's have' : ' has'} no text layer (scanned). They are kept as pictures; run the PDF through OCR first to get reflowable text.`
+      ? `${n(s.scannedPages, 'page')} ${s.scannedPages === 1 ? 'has' : 'have'} no text layer (scanned) and ${s.scannedPages === 1 ? 'is' : 'are'} kept as ${s.scannedPages === 1 ? 'a picture' : 'pictures'}. Turn on text recognition (OCR) below to turn them into reflowable text.`
+      : '';
+    $('ocrInfo').hidden = !s.ocrPages;
+    $('ocrInfo').textContent = s.ocrPages
+      ? `${n(s.ocrPages, 'page')} read with OCR · average confidence ${s.ocrConfidence}%` +
+        (s.ocrConfidence < 70 ? '. Low confidence: check that the right languages are ticked.' : '')
       : '';
   }
 
@@ -285,39 +302,79 @@
     $('status').textContent = msg;
   }
 
+  let pdfData = null;
+  let pdfPassword;
+  let extractRun = 0;
+
+  function ocrOptions() {
+    return { mode: settings.ocrMode, langs: settings.ocrLangs };
+  }
+
+  // Reads the PDF (and runs OCR where needed). Returns false if a newer run replaced this one.
+  async function extract() {
+    const run = ++extractRun;
+    for (;;) {
+      try {
+        const result = await PdfExtract.extractPdf(pdfData.slice(), {
+          keepImages: true,
+          password: pdfPassword,
+          ocr: ocrOptions(),
+          onProgress: (f, msg) => { if (run === extractRun) status(`${msg} (${Math.round(f * 100)}%)`); },
+        });
+        if (run !== extractRun) return false;
+        extracted = result;
+        return true;
+      } catch (err) {
+        if (err && err.name === 'PasswordException') {
+          pdfPassword = window.prompt(err.code === 2 ? 'Wrong password. Try again:' : 'This PDF is protected. Password:');
+          if (pdfPassword === null) { status(''); return false; }
+        } else throw err;
+      }
+    }
+  }
+
   async function open(file) {
     if (!file) return;
     try {
       status(`Opening ${file.name}…`);
-      const data = new Uint8Array(await file.arrayBuffer());
-      let password;
-      for (;;) {
-        try {
-          extracted = await PdfExtract.extractPdf(data.slice(), {
-            keepImages: true,
-            password,
-            onProgress: (f, msg) => status(`${msg} (${Math.round(f * 100)}%)`),
-          });
-          break;
-        } catch (err) {
-          if (err && err.name === 'PasswordException') {
-            password = window.prompt(err.code === 2 ? 'Wrong password. Try again:' : 'This PDF is protected. Password:');
-            if (password === null) { status(''); return; }
-          } else throw err;
-        }
-      }
+      pdfData = new Uint8Array(await file.arrayBuffer());
+      pdfPassword = undefined;
+      $('download').disabled = true;
+      if (!(await extract())) return;
       fileName = file.name.replace(/\.pdf$/i, '');
-      $('title').value = extracted.title || fileName;
+      $('title').value = extracted.title || '';
       $('author').value = extracted.author || '';
       $('bookInfo').hidden = false;
       frameDoc = null;
       pages = 1;
       await rebuild();
+      if (!$('title').value) {
+        // no title in the PDF's metadata: use the first heading (e.g. the title page), else the file name
+        $('title').value = structured.title && structured.title !== 'Untitled' ? structured.title : fileName;
+        structured.title = $('title').value;
+      }
       $('bookTitle').textContent = structured.author ? `${structured.title} — ${structured.author}` : structured.title;
       document.title = `${structured.title} · PDF to EPUB`;
     } catch (err) {
       console.error(err);
       status(`Could not convert this file: ${err.message || err}`);
+    }
+  }
+
+  // OCR settings changed: read the PDF again (only when it makes a difference).
+  async function rerunOcr(previousMode) {
+    if (!pdfData || !extracted) return;
+    const affected = settings.ocrMode === 'all' || previousMode === 'all' ||
+      extracted.pages.some((p) => p.ocr || p.scanned);
+    if (!affected) return;
+    try {
+      $('download').disabled = true;
+      if (!(await extract())) return;
+      await rebuild();
+    } catch (err) {
+      console.error(err);
+      status(String(err.message || err));
+      $('download').disabled = !structured; // the previous result is still there and can be saved
     }
   }
 
@@ -382,6 +439,21 @@
       if (extracted) rebuild();
     });
   }
+  $('ocrMode').addEventListener('change', (e) => {
+    const prev = settings.ocrMode;
+    settings.ocrMode = e.target.value;
+    syncControls();
+    saveSettings();
+    rerunOcr(prev);
+  });
+  $('ocrLangs').addEventListener('change', () => {
+    const picked = [...$('ocrLangs').querySelectorAll('input:checked')].map((cb) => cb.value);
+    if (!picked.length) return; // mid-change (e.g. swapping one language for another): wait for a tick
+    settings.ocrLangs = picked.join('+');
+    saveSettings();
+    clearTimeout(rerunOcr.t);
+    rerunOcr.t = setTimeout(() => rerunOcr(settings.ocrMode), 900); // let several boxes be ticked first
+  });
   for (const k of ['title', 'author']) {
     $(k).addEventListener('change', () => {
       if (!structured) return;

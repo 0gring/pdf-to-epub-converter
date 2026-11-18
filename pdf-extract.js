@@ -39,11 +39,16 @@
     try { info = (await pdf.getMetadata()).info || {}; } catch (_) { /* no metadata */ }
 
     const pages = [];
-    for (let n = 1; n <= pdf.numPages; n++) {
-      o.onProgress((n - 1) / pdf.numPages, `Reading page ${n} of ${pdf.numPages}`);
-      const page = await pdf.getPage(n);
-      pages.push(await extractPage(pdfjs, page, o));
-      page.cleanup();
+    try {
+      for (let n = 1; n <= pdf.numPages; n++) {
+        o.onProgress((n - 1) / pdf.numPages, `Reading page ${n} of ${pdf.numPages}`);
+        o.pageLabel = { n, total: pdf.numPages };
+        const page = await pdf.getPage(n);
+        pages.push(await extractPage(pdfjs, page, o));
+        page.cleanup();
+      }
+    } finally {
+      if (o.ocrWorker) { try { (await o.ocrWorker).terminate(); } catch (_) { /* never started */ } }
     }
 
     const outline = await readOutline(pdf, pages);
@@ -226,6 +231,18 @@
     });
     if (!o.keepImages) pics = [];
 
+    // Text recognition (OCR): scanned pages (or every page) are read from their picture.
+    const ocrMode = (o.ocr && o.ocr.mode) || 'off';
+    if (ocrMode === 'all' || (ocrMode === 'auto' && scanned)) {
+      const res = await ocrPage(page, rotation, vp, o);
+      if (res && (res.lines.length || ocrMode === 'all')) {
+        return {
+          width: vp.width, height: vp.height, rotation, lines: res.lines,
+          images: o.keepImages ? res.images : [], scanned: false, ocr: true, ocrConfidence: res.confidence,
+        };
+      }
+    }
+
     if (scanned && (pics.length || textChars === 0)) {
       // a page without text (a scan or a full-page illustration): keep the whole page as one picture
       pics = [{ left: 0, top: 0, right: vp.width, bottom: vp.height, fullPage: true }];
@@ -242,6 +259,311 @@
     }
 
     return { width: vp.width, height: vp.height, rotation, lines: outLines, images: pics, scanned };
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  // OCR with Tesseract.js (bundled in vendor/tesseract; language models are downloaded once, then cached).
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      el.src = src;
+      el.onload = resolve;
+      el.onerror = () => reject(new Error(`Could not load ${src}`));
+      document.head.appendChild(el);
+    });
+  }
+
+  async function getOcrWorker(o) {
+    if (!o.ocrWorker) {
+      o.ocrWorker = (async () => {
+        if (!global.Tesseract) await loadScript(`${BASE}vendor/tesseract/tesseract.min.js`);
+        const langs = (o.ocr.langs || 'eng').split('+').filter(Boolean);
+        // Tesseract.js never settles createWorker() when a language model fails to load; it only calls
+        // errorHandler. Turn that into a rejection so the app can tell the reader instead of waiting forever.
+        let failed;
+        const failure = new Promise((_, reject) => { failed = reject; });
+        const describe = (e) => {
+          const msg = String((e && e.message) || e || 'unknown error');
+          return /fetch|network|404|traineddata/i.test(msg)
+            ? `Could not download the text recognition model for ${langs.join(' + ')}. Check the internet connection (it is needed once per language).`
+            : `Text recognition failed: ${msg}`;
+        };
+        return Promise.race([failure, global.Tesseract.createWorker(langs, 1 /* LSTM */, {
+          errorHandler: (e) => failed(new Error(describe(e))),
+          workerPath: `${BASE}vendor/tesseract/worker.min.js`,
+          corePath: `${BASE}vendor/tesseract/`,
+          ...(o.ocr.langPath ? { langPath: o.ocr.langPath } : {}), // default: jsDelivr, cached in the browser
+          logger: (m) => {
+            const pl = o.pageLabel || { n: 1, total: 1 };
+            if (/recogniz/.test(m.status)) {
+              o.onProgress((pl.n - 1 + m.progress) / pl.total, `Recognising text on page ${pl.n} of ${pl.total}`);
+            } else if (/load|initializ/.test(m.status)) {
+              o.onProgress((pl.n - 1) / pl.total, `Loading text recognition (${langs.join(', ')})… first time only`);
+            }
+          },
+        })]);
+      })();
+      // a failed start must not stay cached
+      o.ocrWorker.catch(() => { o.ocrWorker = null; });
+    }
+    return o.ocrWorker;
+  }
+
+  const OCR_PICTURE_BLOCKS = new Set([9, 10, 11]); // Tesseract PT_FLOWING_IMAGE, PT_HEADING_IMAGE, PT_PULLOUT_IMAGE
+
+  async function ocrPage(page, rotation, vp, o) {
+    // about 300 dpi, capped so huge pages stay within memory
+    const scale = Math.min(300 / 72, 4200 / Math.max(vp.width, vp.height));
+    const canvas = await renderPage(page, scale, rotation);
+    try {
+      const worker = await getOcrWorker(o);
+      const { data } = await worker.recognize(canvas, {}, { blocks: true, text: false });
+      const raw = [];
+      const images = [];
+      for (const block of data.blocks || []) {
+        if (OCR_PICTURE_BLOCKS.has(block.blocktype)) {
+          const b = { left: block.bbox.x0 / scale, top: block.bbox.y0 / scale, right: block.bbox.x1 / scale, bottom: block.bbox.y1 / scale };
+          if (b.right - b.left > 30 && b.bottom - b.top > 30) {
+            b.src = cropToDataUrl(canvas, b, scale);
+            b.width = Math.round((b.right - b.left) * Math.min(scale, o.imageScale));
+            b.height = Math.round((b.bottom - b.top) * Math.min(scale, o.imageScale));
+            images.push(b);
+          }
+          continue;
+        }
+        for (const para of block.paragraphs || []) {
+          for (const line of para.lines || []) {
+            const words = (line.words || []).filter((w) => w.text && w.text.trim())
+              .map((w) => ({ text: w.text.replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '').trim(), x0: w.bbox.x0, x1: w.bbox.x1, y0: w.bbox.y0, y1: w.bbox.y1, conf: w.confidence }));
+            if (!words.length) continue;
+            const bb = line.bbox;
+            raw.push({
+              words,
+              rowH: (line.rowAttributes && line.rowAttributes.rowHeight) || (bb.y1 - bb.y0),
+              base: line.baseline ? (line.baseline.y0 + line.baseline.y1) / 2 : bb.y1,
+              y0: bb.y0,
+              y1: bb.y1,
+            });
+          }
+        }
+      }
+
+      const ordered = splitColumns(raw);
+      const lines = [];
+      let confSum = 0;
+      let confChars = 0;
+      for (const seg of ordered) {
+        const text = seg.words.map((w) => w.text).join(' ').replace(/\s+/g, ' ');
+        const conf = seg.words.reduce((sum, w) => sum + w.conf * w.text.length, 0) / Math.max(1, text.length);
+        // specks and smudges come back as low-confidence lines without real words
+        if ((conf < 45 && !/\p{L}{2}/u.test(text)) || conf < 25) continue;
+        confSum += conf * text.length;
+        confChars += text.length;
+        const left = Math.min(...seg.words.map((w) => w.x0));
+        const right = Math.max(...seg.words.map((w) => w.x1));
+        lines.push({
+          runs: [{ text, b: false, i: false, m: false, sup: false, sub: false }],
+          text,
+          size: Math.round((seg.rowH / scale) * 2) / 2,
+          base: seg.base / scale,
+          top: Math.min(...seg.words.map((w) => w.y0)) / scale,
+          bottom: Math.max(...seg.words.map((w) => w.y1)) / scale,
+          left: left / scale,
+          right: right / scale,
+          rtl: count(text, RTL_CHARS) > count(text, LTR_CHARS),
+          ocr: true,
+        });
+      }
+      // pictures: Tesseract does not report them, so look for large inked areas that are not text
+      if (o.keepImages) {
+        const textBoxes = lines.filter((l) => /\p{L}{2}/u.test(l.text)).map((l) => l);
+        for (const b of detectPictures(canvas, scale, textBoxes)) {
+          b.src = cropToDataUrl(canvas, b, scale);
+          b.width = Math.round((b.right - b.left) * Math.min(scale, o.imageScale));
+          b.height = Math.round((b.bottom - b.top) * Math.min(scale, o.imageScale));
+          images.push(b);
+        }
+      }
+      // text "recognised" inside a picture is noise
+      const inPicture = (l) => images.some((b) => {
+        const cx = (l.left + l.right) / 2;
+        const cy = (l.top + l.bottom) / 2;
+        return cx > b.left && cx < b.right && cy > b.top && cy < b.bottom;
+      });
+      return { lines: lines.filter((l) => !inPicture(l)), images, confidence: confChars ? confSum / confChars : 0 };
+    } finally {
+      canvas.width = canvas.height = 0;
+    }
+  }
+
+  // Tesseract often reads narrow-gutter columns as one wide line. Find gutters (word gaps that recur at the
+  // same x on many lines), split the lines there, and put the pieces back in reading order: within each run
+  // of split lines, the whole first column, then the next. Full-width lines stay where they are.
+  function splitColumns(raw) {
+    if (raw.length < 4) return raw;
+    const rtlPage = raw.reduce((n, l) => n + count(l.words.map((w) => w.text).join(''), RTL_CHARS), 0) >
+      raw.reduce((n, l) => n + count(l.words.map((w) => w.text).join(''), LTR_CHARS), 0);
+    const rowH = [...raw.map((l) => l.rowH)].sort((a, b) => a - b)[Math.floor(raw.length / 2)] || 20;
+    const bin = rowH * 0.5;
+    const votes = new Map();
+    for (const l of raw) {
+      const ws = [...l.words].sort((a, b) => a.x0 - b.x0);
+      const seen = new Set();
+      for (let i = 1; i < ws.length; i++) {
+        const gap = ws[i].x0 - ws[i - 1].x1;
+        if (gap < rowH * 0.9) continue;
+        const k = Math.round((ws[i - 1].x1 + ws[i].x0) / 2 / bin);
+        if (!seen.has(k)) { seen.add(k); votes.set(k, (votes.get(k) || 0) + 1); }
+      }
+    }
+    const need = Math.min(Math.max(3, raw.length * 0.2), 4); // a few lines of columns are enough
+    const gutters = [];
+    for (const [k, v] of [...votes.entries()].sort((a, b) => a[0] - b[0])) {
+      const n = v + (votes.get(k - 1) || 0) + (votes.get(k + 1) || 0);
+      if (n >= need && !gutters.some((g) => Math.abs(g / bin - k) <= 2)) gutters.push(k * bin);
+    }
+    if (!gutters.length) return raw;
+
+    const colOf = (x) => { let c = 0; for (const g of gutters) if (x > g) c++; return rtlPage ? gutters.length - c : c; };
+    // split every line at the gutters it has a real gap at
+    const rows = raw.map((l) => {
+      const ws = [...l.words].sort((a, b) => a.x0 - b.x0);
+      const pieces = [[ws[0]]];
+      for (let i = 1; i < ws.length; i++) {
+        const gap = ws[i].x0 - ws[i - 1].x1;
+        // the gap must contain the gutter (a short last word leaves a wide gap that is still a gutter)
+        if (gap > rowH * 0.6 && gutters.some((g) => ws[i - 1].x1 < g + bin && ws[i].x0 > g - bin)) pieces.push([]);
+        pieces[pieces.length - 1].push(ws[i]);
+      }
+      const segs = pieces.map((p) => {
+        const set = new Set(p);
+        return Object.assign({}, l, { words: l.words.filter((w) => set.has(w)) }); // keep the reading (logical) word order
+      });
+      const x0 = ws[0].x0;
+      const x1 = ws[ws.length - 1].x1;
+      const full = segs.length === 1 && gutters.some((g) => x0 < g - rowH && x1 > g + rowH);
+      return { segs, full };
+    });
+
+    // real columns carry text on every side; a table of contents ("Title ...... 12") does not
+    const widths = new Map();
+    for (const r of rows) {
+      if (r.full || r.segs.length < 2) continue;
+      for (const seg of r.segs) {
+        const xs = seg.words.map((w) => (w.x0 + w.x1) / 2);
+        const c = colOf(xs.reduce((a, b) => a + b, 0) / xs.length);
+        if (!widths.has(c)) widths.set(c, []);
+        widths.get(c).push(Math.max(...seg.words.map((w) => w.x1)) - Math.min(...seg.words.map((w) => w.x0)));
+      }
+    }
+    if (widths.size < 2 || [...widths.values()].some((ws) => ws.sort((a, b) => a - b)[Math.floor(ws.length / 2)] < rowH * 8)) return raw;
+
+    const out = [];
+    let zone = [];
+    const flushZone = () => {
+      const byCol = new Map();
+      for (const seg of zone) {
+        const xs = seg.words.map((w) => (w.x0 + w.x1) / 2);
+        const c = colOf(xs.reduce((a, b) => a + b, 0) / xs.length);
+        if (!byCol.has(c)) byCol.set(c, []);
+        byCol.get(c).push(seg);
+      }
+      for (const c of [...byCol.keys()].sort((a, b) => a - b)) out.push(...byCol.get(c));
+      zone = [];
+    };
+    for (const r of rows) {
+      if (r.full) { flushZone(); out.push(...r.segs); } else zone.push(...r.segs);
+    }
+    flushZone();
+    return out;
+  }
+
+  // Finds pictures on a scanned page: cells (about 4 pt square) with enough ink that are not covered by text
+  // lines are grouped into regions; large, dense regions are pictures. Returns boxes in page units.
+  function detectPictures(canvas, scale, textLines) {
+    const W = canvas.width;
+    const H = canvas.height;
+    const cell = Math.max(4, Math.round(scale * 4));
+    const gw = Math.ceil(W / cell);
+    const gh = Math.ceil(H / cell);
+    const img = canvas.getContext('2d').getImageData(0, 0, W, H).data;
+    // paper brightness: a bright percentile of a pixel sample (handles yellowed or grey scans)
+    const sample = [];
+    for (let i = 0; i < img.length; i += 4 * 97) sample.push((img[i] * 299 + img[i + 1] * 587 + img[i + 2] * 114) / 1000);
+    sample.sort((a, b) => a - b);
+    const paper = sample[Math.floor(sample.length * 0.9)] || 255;
+    const inkBelow = paper - 35;
+
+    const covered = new Uint8Array(gw * gh);
+    const pad = 2 * scale;
+    for (const l of textLines) {
+      const x0 = Math.max(0, Math.floor((l.left * scale - pad) / cell));
+      const x1 = Math.min(gw - 1, Math.floor((l.right * scale + pad) / cell));
+      const y0 = Math.max(0, Math.floor((l.top * scale - pad) / cell));
+      const y1 = Math.min(gh - 1, Math.floor((l.bottom * scale + pad) / cell));
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) covered[y * gw + x] = 1;
+    }
+    const ink = new Uint8Array(gw * gh);
+    const step = Math.max(1, Math.floor(cell / 4)); // sample 4x4 pixels per cell
+    for (let gy = 0; gy < gh; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        if (covered[gy * gw + gx]) continue;
+        let n = 0;
+        let dark = 0;
+        for (let y = gy * cell; y < Math.min(H, (gy + 1) * cell); y += step) {
+          for (let x = gx * cell; x < Math.min(W, (gx + 1) * cell); x += step) {
+            const i = (y * W + x) * 4;
+            n++;
+            if ((img[i] * 299 + img[i + 1] * 587 + img[i + 2] * 114) / 1000 < inkBelow) dark++;
+          }
+        }
+        if (n && dark / n > 0.12) ink[gy * gw + gx] = 1;
+      }
+    }
+    // connected regions (8-neighbour, bridging 1-cell gaps)
+    const seen = new Uint8Array(gw * gh);
+    const boxes = [];
+    for (let start = 0; start < ink.length; start++) {
+      if (!ink[start] || seen[start]) continue;
+      const stack = [start];
+      seen[start] = 1;
+      let x0 = gw;
+      let y0 = gh;
+      let x1 = 0;
+      let y1 = 0;
+      let cells = 0;
+      while (stack.length) {
+        const c = stack.pop();
+        const cx = c % gw;
+        const cy = (c - cx) / gw;
+        cells++;
+        if (cx < x0) x0 = cx;
+        if (cx > x1) x1 = cx;
+        if (cy < y0) y0 = cy;
+        if (cy > y1) y1 = cy;
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            const nx = cx + dx;
+            const ny = cy + dy;
+            if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+            const ni = ny * gw + nx;
+            if (ink[ni] && !seen[ni]) { seen[ni] = 1; stack.push(ni); }
+          }
+        }
+      }
+      const w = (x1 - x0 + 1) * cell / scale;
+      const h = (y1 - y0 + 1) * cell / scale;
+      const density = cells / ((x1 - x0 + 1) * (y1 - y0 + 1));
+      if (w >= 40 && h >= 30 && w * h >= 2500 && density >= 0.35) {
+        boxes.push({
+          left: Math.max(0, (x0 * cell) / scale),
+          top: Math.max(0, (y0 * cell) / scale),
+          right: Math.min(W, (x1 + 1) * cell) / scale,
+          bottom: Math.min(H, (y1 + 1) * cell) / scale,
+        });
+      }
+    }
+    return boxes;
   }
 
   async function renderPage(page, scale, rotation) {

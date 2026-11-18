@@ -26,6 +26,11 @@ Appearance saved into the EPUB:
   --line-height <n>         e.g. 1.7
   --justify                 justify paragraphs
 
+Text recognition (OCR) for scanned PDFs:
+  --ocr <mode>              auto (scanned pages only) | all (every page) | off             [auto]
+  --lang <codes>            OCR languages joined by +, e.g. eng, heb, heb+eng, fra, ara    [eng]
+  --lang-dir <dir>          offline: folder with <lang>.traineddata.gz files (default: download)
+
 Conversion:
   --keep-headers            keep running page headers, footers and page numbers
   --no-join-hyphens         keep words hyphenated at line ends split
@@ -39,6 +44,7 @@ function parseArgs(argv) {
   const conv = {};
   const look = {};
   const meta = {};
+  const ocr = { mode: 'auto', langs: 'eng' };
   let input = null;
   let out = null;
   let includeCover = true;
@@ -60,6 +66,9 @@ function parseArgs(argv) {
       case '--font': look.font = next(); break;
       case '--line-height': look.lineHeight = parseFloat(next()); break;
       case '--justify': look.justify = true; break;
+      case '--ocr': ocr.mode = next(); break;
+      case '--lang': case '--langs': ocr.langs = next(); break;
+      case '--lang-dir': ocr.langDir = path.resolve(next()); break;
       case '--keep-headers': conv.removeHeadersFooters = false; break;
       case '--no-join-hyphens': conv.joinHyphens = false; break;
       case '--no-headings': conv.detectHeadings = false; break;
@@ -72,7 +81,7 @@ function parseArgs(argv) {
     }
   }
   if (!input) { console.log(HELP); process.exit(1); }
-  return { input, out: out || `${input.replace(/\.pdf$/i, '')}.epub`, conv, look, meta, includeCover };
+  return { input, out: out || `${input.replace(/\.pdf$/i, '')}.epub`, conv, look, meta, includeCover, ocr };
 }
 
 async function loadPlaywright() {
@@ -97,14 +106,29 @@ try {
   page.on('pageerror', (e) => console.error('page error:', e.message));
   // pdf.js is an ES module, which browsers will not load from file:// URLs, so the engine is served from memory
   await page.route('http://pdf-to-epub.local/**', async (route) => {
-    const file = path.join(here, decodeURIComponent(new URL(route.request().url()).pathname));
+    const urlPath = decodeURIComponent(new URL(route.request().url()).pathname);
+    if (urlPath.startsWith('/langdata/') && args.ocr.langDir) { // --lang-dir: offline OCR language files
+      const lang = path.join(args.ocr.langDir, path.basename(urlPath));
+      return existsSync(lang) ? route.fulfill({ body: await readFile(lang) }) : route.fulfill({ status: 404 });
+    }
+    const file = path.join(here, urlPath);
     if (!file.startsWith(here) || !existsSync(file)) return route.fulfill({ status: 404 });
     return route.fulfill({ body: await readFile(file), contentType: MIME[path.extname(file)] || 'application/octet-stream' });
   });
+  let lastLine = '';
+  await page.exposeFunction('cliProgress', (msg) => {
+    if (msg !== lastLine && process.stderr.isTTY) process.stderr.write(`\r\x1b[K${msg}`);
+    lastLine = msg;
+  });
+  if (args.ocr.langDir) args.ocr.langPath = 'http://pdf-to-epub.local/langdata';
   await page.goto('http://pdf-to-epub.local/engine.html');
   const result = await page.evaluate(async ({ b64, a }) => {
     const data = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-    const doc = await window.PdfExtract.extractPdf(data, { password: a.meta.password });
+    const doc = await window.PdfExtract.extractPdf(data, {
+      password: a.meta.password,
+      ocr: a.ocr,
+      onProgress: (f, msg) => window.cliProgress(`${msg} (${Math.round(f * 100)}%)`),
+    });
     const book = window.PdfStructure.buildBook(doc, a.conv);
     if (a.meta.title) book.title = a.meta.title;
     else if (!doc.title && book.title === 'Untitled') book.title = a.fileTitle;
@@ -114,12 +138,17 @@ try {
     for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
     return { epub: btoa(s), stats: book.stats, chapters: book.chapters.length, title: book.title };
   }, { b64: pdf.toString('base64'), a: { ...args, fileTitle: path.basename(args.input).replace(/\.pdf$/i, '') } });
+  if (process.stderr.isTTY) process.stderr.write('\r\x1b[K');
   const out = Buffer.from(result.epub, 'base64');
   await writeFile(args.out, out);
   const s = result.stats;
   console.log(`Saved ${args.out} (${(out.length / 1024).toFixed(0)} KB): "${result.title}", ${s.pages} pages -> ` +
     `${result.chapters} chapters, ${s.headings} headings, ${s.paragraphs} paragraphs, ${s.images} pictures`);
-  if (s.scannedPages) console.log(`Note: ${s.scannedPages} page(s) have no text layer (scanned) and were kept as pictures.`);
+  if (s.ocrPages) console.log(`OCR: ${s.ocrPages} page(s) recognised, average confidence ${s.ocrConfidence}%.`);
+  if (s.scannedPages) console.log(`Note: ${s.scannedPages} page(s) have no text layer (scanned) and were kept as pictures (use --ocr auto).`);
+} catch (err) {
+  console.error(`\n${String(err.message || err).split('\n')[0].replace(/^page\.evaluate: (Error: )?/, '')}`);
+  process.exitCode = 1;
 } finally {
   await browser.close();
 }

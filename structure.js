@@ -235,7 +235,12 @@
           const gl = geo(l);
           const ga = geo(a);
           const indent = gl.start > gl.colStart + bodySize * 0.9;
-          const prevShort = ga.end < ga.colEnd - bodySize * 2.5;
+          // The previous line ended early on purpose only if the next line's first word would have fitted in
+          // the space left (otherwise it is just ragged-right text wrapping).
+          const room = ga.colEnd - ga.end;
+          const firstWord = (l.text.match(/^\S+/) || [''])[0];
+          const wordWidth = (firstWord.length * 0.55 + 0.4) * l.size;
+          const prevShort = room > bodySize * 2.5 && (room > wordWidth || room > (ga.colEnd - ga.colStart) * 0.4);
           const centered = isCentered(l);
           brk = sizeChange || styleChange || (bigGap && !wentUp) || BULLET.test(l.text) ||
             // a first-line indent starts a paragraph
@@ -309,6 +314,11 @@
         headings: blocks.filter((b) => b.type === 'h').length,
         images: blocks.filter((b) => b.type === 'img').length,
         scannedPages: doc.pages.filter((p) => p.scanned).length,
+        ocrPages: doc.pages.filter((p) => p.ocr).length,
+        ocrConfidence: (() => {
+          const ps = doc.pages.filter((p) => p.ocr && p.ocrConfidence);
+          return ps.length ? Math.round(ps.reduce((a, p) => a + p.ocrConfidence, 0) / ps.length) : null;
+        })(),
       },
     };
   }
