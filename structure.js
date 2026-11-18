@@ -187,8 +187,8 @@
         }
       }
       const centered = pr.lines.length <= 3 && pr.lines.every(isCentered);
-      if (level) return { type: 'h', level, runs: runs.map((r) => Object.assign(r, { b: false })), text, rtl, centered, size: first.size, fromOutline: !!pr.outlineLevel };
-      return { type: 'p', runs, text, rtl, centered, size: first.size / bodySize };
+      if (level) return { type: 'h', level, runs: runs.map((r) => Object.assign(r, { b: false })), text, rtl, centered, size: first.size, fromOutline: !!pr.outlineLevel, page: pr.page };
+      return { type: 'p', runs, text, rtl, centered, size: first.size / bodySize, page: pr.page };
     }
 
     pages.forEach((p, pi) => {
@@ -212,13 +212,13 @@
       for (const it of ordered) {
         if (it.kind === 'img') {
           flush();
-          blocks.push({ type: 'img', src: it.im.src, width: it.im.width, height: it.im.height, fullPage: !!it.im.fullPage });
+          blocks.push({ type: 'img', src: it.im.src, width: it.im.width, height: it.im.height, fullPage: !!it.im.fullPage, page: pi });
           prevLine = null;
           continue;
         }
         if (it.kind === 'outline') {
           flush();
-          blocks.push({ type: 'h', level: it.ins.level, runs: [{ text: it.ins.title }], text: it.ins.title, fromOutline: true });
+          blocks.push({ type: 'h', level: it.ins.level, runs: [{ text: it.ins.title }], text: it.ins.title, fromOutline: true, page: pi });
           prevLine = null;
           continue;
         }

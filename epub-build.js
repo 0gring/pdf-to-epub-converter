@@ -52,20 +52,26 @@ code { font-family: monospace; }
 [dir="rtl"] h2, [dir="rtl"] h3, [dir="rtl"] h4 { text-align: right; }
 `;
 
-  function appearanceCss(a) {
+  // strong: for an existing EPUB, whose own styles must not win over the chosen appearance
+  function appearanceCss(a, strong) {
     a = Object.assign({}, APPEARANCE, a);
+    const imp = strong ? ' !important' : '';
     let css = '';
     const colors = a.theme === 'custom' ? { fg: a.fg, bg: a.bg, link: a.fg } : THEMES[a.theme];
     if (colors) {
-      css += `html, body { background-color: ${colors.bg}; color: ${colors.fg}; }\n`;
-      css += `p, h1, h2, h3, h4, h5, h6, li, span, b, i, strong, em, figure, figcaption { color: ${colors.fg}; }\n`;
-      css += `a { color: ${colors.link}; }\n`;
+      css += `html, body { background-color: ${colors.bg}${imp}; color: ${colors.fg}${imp}; }\n`;
+      if (strong) {
+        css += `body * { color: ${colors.fg} !important; background-color: transparent !important; border-color: ${colors.fg} !important; }\n`;
+      } else {
+        css += `p, h1, h2, h3, h4, h5, h6, li, span, b, i, strong, em, figure, figcaption { color: ${colors.fg}; }\n`;
+      }
+      css += `a, a * { color: ${colors.link}${imp}; }\n`;
     }
-    if (a.invertImages) css += 'img { filter: invert(1) hue-rotate(180deg); }\n';
-    if (a.zoom && Math.abs(a.zoom - 1) > 0.01) css += `body { font-size: ${Math.round(a.zoom * 100)}%; }\n`;
-    if (FONTS[a.font]) css += `body, p, h1, h2, h3, h4, h5, h6 { font-family: ${FONTS[a.font]}; }\n`;
-    if (a.lineHeight > 0) css += `body, p { line-height: ${a.lineHeight}; }\n`;
-    if (a.justify) css += 'p { text-align: justify; hyphens: auto; -webkit-hyphens: auto; }\n';
+    if (a.invertImages) css += `img, svg image { filter: invert(1) hue-rotate(180deg)${imp}; }\n`;
+    if (a.zoom && Math.abs(a.zoom - 1) > 0.01) css += `body { font-size: ${Math.round(a.zoom * 100)}%${imp}; }\n`;
+    if (FONTS[a.font]) css += `body, p, h1, h2, h3, h4, h5, h6, li, div, span { font-family: ${FONTS[a.font]}${imp}; }\n`;
+    if (a.lineHeight > 0) css += `body, p, li, div { line-height: ${a.lineHeight}${imp}; }\n`;
+    if (a.justify) css += `p { text-align: justify${imp}; hyphens: auto; -webkit-hyphens: auto; }\n`;
     return css;
   }
 
@@ -82,6 +88,37 @@ code { font-family: monospace; }
       out += t;
     }
     return out.replace(/<\/(b|i|code)><\1>/g, '');
+  }
+
+  // Paragraph/heading/picture blocks (structure.js) -> XHTML body markup.
+  // opts: rtl (book direction), state ({ hid } heading counter shared across files), addImage(src) -> href,
+  //       onHeading(level, id, text), idPrefix.
+  function blocksToXhtml(blocks, opts) {
+    const st = opts.state || { hid: 0 };
+    let body = '';
+    let afterHeading = true;
+    for (const b of blocks) {
+      const bdir = b.rtl !== undefined && b.rtl !== !!opts.rtl ? ` dir="${b.rtl ? 'rtl' : 'ltr'}"` : '';
+      if (b.type === 'h') {
+        const id = `${opts.idPrefix || 'h'}${++st.hid}`;
+        const lvl = Math.min(6, Math.max(1, b.level));
+        body += `<h${lvl} id="${id}"${bdir}${b.centered && lvl > 1 ? ' class="center"' : ''}>${runsToXhtml(b.runs)}</h${lvl}>\n`;
+        if (opts.onHeading) opts.onHeading(lvl, id, b.text);
+        afterHeading = true;
+      } else if (b.type === 'img') {
+        const href = opts.addImage(b.src, b);
+        body += `<figure${b.fullPage ? ' class="page"' : ''}><img src="${esc(href)}" alt=""${b.width ? ` width="${b.width}" height="${b.height}"` : ''}/></figure>\n`;
+        afterHeading = true;
+      } else {
+        const cls = [];
+        if (afterHeading) cls.push('first');
+        if (b.centered) cls.push('center');
+        if (b.size && b.size < 0.85) cls.push('small');
+        body += `<p${cls.length ? ` class="${cls.join(' ')}"` : ''}${bdir}>${runsToXhtml(b.runs)}</p>\n`;
+        afterHeading = false;
+      }
+    }
+    return body;
   }
 
   function dataUrlToBytes(url) {
@@ -140,32 +177,15 @@ ${body}
     }
 
     // chapters
-    let hid = 0;
+    const state = { hid: 0 };
     book.chapters.forEach((ch, ci) => {
       const file = `text/chapter${String(ci + 1).padStart(3, '0')}.xhtml`;
-      let body = '';
-      let afterHeading = true;
-      for (const b of ch.blocks) {
-        const bdir = b.rtl !== undefined && b.rtl !== book.rtl ? ` dir="${b.rtl ? 'rtl' : 'ltr'}"` : '';
-        if (b.type === 'h') {
-          const id = `h${++hid}`;
-          const lvl = Math.min(6, Math.max(1, b.level));
-          body += `<h${lvl} id="${id}"${bdir}${b.centered && lvl > 1 ? ' class="center"' : ''}>${runsToXhtml(b.runs)}</h${lvl}>\n`;
-          if (lvl <= 3) toc.push({ level: lvl, title: b.text, href: `${file}#${id}` });
-          afterHeading = true;
-        } else if (b.type === 'img') {
-          const name = addImage(b.src);
-          body += `<figure${b.fullPage ? ' class="page"' : ''}><img src="../${name}" alt=""${b.width ? ` width="${b.width}" height="${b.height}"` : ''}/></figure>\n`;
-          afterHeading = true;
-        } else {
-          const cls = [];
-          if (afterHeading) cls.push('first');
-          if (b.centered) cls.push('center');
-          if (b.size && b.size < 0.85) cls.push('small');
-          body += `<p${cls.length ? ` class="${cls.join(' ')}"` : ''}${bdir}>${runsToXhtml(b.runs)}</p>\n`;
-          afterHeading = false;
-        }
-      }
+      const body = blocksToXhtml(ch.blocks, {
+        rtl: book.rtl,
+        state,
+        addImage: (src, b) => `../${addImage(src, b)}`,
+        onHeading: (level, id, text) => { if (level <= 3) toc.push({ level, title: text, href: `${file}#${id}` }); },
+      });
       zip.file(`OEBPS/${file}`, page(ch.title || book.title, body));
       const id = `ch${ci + 1}`;
       manifest.push({ id, href: file, type: 'application/xhtml+xml' });
@@ -223,5 +243,5 @@ ${spine.map((s) => `<itemref idref="${s.id}"${s.linear ? ` linear="${s.linear}"`
     return zip.generateAsync({ type: options.type, mimeType: 'application/epub+zip', compression: 'DEFLATE', compressionOptions: { level: 9 } });
   }
 
-  global.EpubBuild = { buildEpub, appearanceCss, APPEARANCE };
+  global.EpubBuild = { buildEpub, appearanceCss, blocksToXhtml, dataUrlToBytes, esc, BASE_CSS, APPEARANCE };
 })(typeof window !== 'undefined' ? window : globalThis);

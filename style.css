@@ -150,6 +150,7 @@ select, input[type=number], input[type=text] {
   padding: 8px 16px; border-radius: 999px; font-size: 13px; z-index: 4; max-width: calc(100% - 32px);
 }
 [hidden] { display: none !important; }
+body[data-source="epub"] .pdf-only { display: none; }
 
 @media (max-width: 760px) {
   .top { flex-wrap: wrap; gap: 8px 12px; }

@@ -9,7 +9,10 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-const HELP = `Usage: node cli.mjs <book.pdf> [options]
+const HELP = `Usage: node cli.mjs <book.pdf | book.epub> [options]
+
+A PDF is converted into an EPUB. An existing EPUB is enhanced: pages that are pictures of text are read with
+OCR and become real text, and the appearance options below (and --title/--author) are written into the book.
 
   -o, --out <file.epub>     output file (default: next to the PDF)
   --title <text>            book title (default: from the PDF)
@@ -81,7 +84,8 @@ function parseArgs(argv) {
     }
   }
   if (!input) { console.log(HELP); process.exit(1); }
-  return { input, out: out || `${input.replace(/\.pdf$/i, '')}.epub`, conv, look, meta, includeCover, ocr };
+  const isEpub = /\.epub$/i.test(input);
+  return { input, isEpub, out: out || (isEpub ? input.replace(/\.epub$/i, '-enhanced.epub') : `${input.replace(/\.pdf$/i, '')}.epub`), conv, look, meta, includeCover, ocr };
 }
 
 async function loadPlaywright() {
@@ -124,6 +128,21 @@ try {
   await page.goto('http://pdf-to-epub.local/engine.html');
   const result = await page.evaluate(async ({ b64, a }) => {
     const data = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const toB64 = (bytes) => {
+      let s = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      return btoa(s);
+    };
+    if (a.isEpub) {
+      const an = await window.EpubEnhance.openEpub(data);
+      const pages = a.ocr.mode === 'off' ? [] : await window.EpubEnhance.ocrEpub(an, {
+        ocr: a.ocr, onProgress: (f, msg) => window.cliProgress(`${msg} (${Math.round(f * 100)}%)`),
+      });
+      const title = a.meta.title || an.title;
+      const r = await window.EpubEnhance.buildEnhanced(an, pages, a.conv, a.look, { title, author: a.meta.author || an.author });
+      const conf = pages.length ? Math.round(pages.reduce((x, p) => x + p.ocrConfidence, 0) / pages.length) : null;
+      return { epub: toB64(r.epub), enhance: r.stats, title, sections: an.docs.length, scans: an.candidates.auto.length, ocrPages: pages.length, conf };
+    }
     const doc = await window.PdfExtract.extractPdf(data, {
       password: a.meta.password,
       ocr: a.ocr,
@@ -141,11 +160,19 @@ try {
   if (process.stderr.isTTY) process.stderr.write('\r\x1b[K');
   const out = Buffer.from(result.epub, 'base64');
   await writeFile(args.out, out);
-  const s = result.stats;
-  console.log(`Saved ${args.out} (${(out.length / 1024).toFixed(0)} KB): "${result.title}", ${s.pages} pages -> ` +
-    `${result.chapters} chapters, ${s.headings} headings, ${s.paragraphs} paragraphs, ${s.images} pictures`);
-  if (s.ocrPages) console.log(`OCR: ${s.ocrPages} page(s) recognised, average confidence ${s.ocrConfidence}%.`);
-  if (s.scannedPages) console.log(`Note: ${s.scannedPages} page(s) have no text layer (scanned) and were kept as pictures (use --ocr auto).`);
+  if (result.enhance) {
+    const e = result.enhance;
+    console.log(`Saved ${args.out} (${(out.length / 1024).toFixed(0)} KB): "${result.title}", ${result.sections} sections, ` +
+      `${result.scans} page picture(s) of text` + (e.replaced ? ` -> ${e.replaced} turned into ${e.paragraphs} paragraphs, ${e.headings} headings, ${e.pictures} illustrations` : ''));
+    if (result.ocrPages) console.log(`OCR: ${result.ocrPages} page(s) recognised, average confidence ${result.conf}%.`);
+    else if (result.scans && args.ocr.mode === 'off') console.log('Note: OCR is off, so pages that are pictures of text stay pictures (use --ocr auto).');
+  } else {
+    const s = result.stats;
+    console.log(`Saved ${args.out} (${(out.length / 1024).toFixed(0)} KB): "${result.title}", ${s.pages} pages -> ` +
+      `${result.chapters} chapters, ${s.headings} headings, ${s.paragraphs} paragraphs, ${s.images} pictures`);
+    if (s.ocrPages) console.log(`OCR: ${s.ocrPages} page(s) recognised, average confidence ${s.ocrConfidence}%.`);
+    if (s.scannedPages) console.log(`Note: ${s.scannedPages} page(s) have no text layer (scanned) and were kept as pictures (use --ocr auto).`);
+  }
 } catch (err) {
   console.error(`\n${String(err.message || err).split('\n')[0].replace(/^page\.evaluate: (Error: )?/, '')}`);
   process.exitCode = 1;

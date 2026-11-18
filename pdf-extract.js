@@ -316,6 +316,16 @@
     const scale = Math.min(300 / 72, 4200 / Math.max(vp.width, vp.height));
     const canvas = await renderPage(page, scale, rotation);
     try {
+      return await ocrCanvas(canvas, scale, o);
+    } finally {
+      canvas.width = canvas.height = 0;
+    }
+  }
+
+  // OCR of a page picture. `scale` = canvas pixels per page unit (about 1/72 inch). Returns text lines and
+  // pictures in page units, in the same shape as text extracted from a PDF page.
+  async function ocrCanvas(canvas, scale, o) {
+    {
       const worker = await getOcrWorker(o);
       const { data } = await worker.recognize(canvas, {}, { blocks: true, text: false });
       const raw = [];
@@ -372,8 +382,48 @@
           right: right / scale,
           rtl: count(text, RTL_CHARS) > count(text, LTR_CHARS),
           ocr: true,
+          conf,
         });
       }
+
+      // Tesseract sometimes adds "ghost" lines of junk on top of real ones (often on enlarged scans). Real
+      // lines never overlap, so of two lines that do, keep the more confident one.
+      const ghost = new Set();
+      for (let i = 0; i < lines.length; i++) {
+        for (let j = i + 1; j < lines.length; j++) {
+          const a = lines[i];
+          const b = lines[j];
+          const vy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+          const vx = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+          if (vy > 0.4 * Math.min(a.bottom - a.top, b.bottom - b.top) && vx > 0.3 * Math.min(a.right - a.left, b.right - b.left)) {
+            ghost.add(a.conf * a.text.length >= b.conf * b.text.length ? b : a);
+          }
+        }
+      }
+      if (ghost.size) {
+        for (const g of ghost) { confSum -= g.conf * g.text.length; confChars -= g.text.length; }
+        for (let i = lines.length - 1; i >= 0; i--) if (ghost.has(lines[i])) lines.splice(i, 1);
+      }
+      // Line heights vary with the letters on the line (descenders, capitals), so OCR sizes are noisy: give lines
+      // whose sizes are within ~15% of each other one common size (real headings are clearly bigger).
+      const sorted = [...lines].sort((a, b) => a.size - b.size);
+      let group = [];
+      const settle = () => {
+        if (!group.length) return;
+        const weights = group.map((l) => l.text.length);
+        const total = weights.reduce((x, y) => x + y, 0);
+        let acc = 0;
+        let size = group[0].size;
+        for (let i = 0; i < group.length; i++) { acc += weights[i]; if (acc >= total / 2) { size = group[i].size; break; } }
+        for (const l of group) l.size = size;
+        group = [];
+      };
+      for (const l of sorted) {
+        if (group.length && l.size > group[0].size * 1.15) settle();
+        group.push(l);
+      }
+      settle();
+
       // pictures: Tesseract does not report them, so look for large inked areas that are not text
       if (o.keepImages) {
         const textBoxes = lines.filter((l) => /\p{L}{2}/u.test(l.text)).map((l) => l);
@@ -391,8 +441,6 @@
         return cx > b.left && cx < b.right && cy > b.top && cy < b.bottom;
       });
       return { lines: lines.filter((l) => !inPicture(l)), images, confidence: confChars ? confSum / confChars : 0 };
-    } finally {
-      canvas.width = canvas.height = 0;
     }
   }
 
@@ -626,5 +674,9 @@
     return out;
   }
 
-  global.PdfExtract = { extractPdf, loadPdfjs };
+  async function endOcr(o) {
+    if (o && o.ocrWorker) { try { (await o.ocrWorker).terminate(); } catch (_) { /* never started */ } o.ocrWorker = null; }
+  }
+
+  global.PdfExtract = { extractPdf, loadPdfjs, ocrCanvas, endOcr, BASE };
 })(typeof window !== 'undefined' ? window : globalThis);

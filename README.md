@@ -1,9 +1,10 @@
 # PDF → EPUB
 
-A high-quality PDF to EPUB converter that runs entirely in the browser, so the file never leaves your device.
+A high-quality PDF to EPUB converter that runs entirely in the browser, so the file never leaves your device. It can
+also **enhance an existing EPUB**: OCR for pages that are only pictures, plus new colours, text size and font.
 
-**Use it online:** https://0gring.github.io/pdf-to-epub-converter/. Drop in a `.pdf`, check the live preview, and
-press **Download EPUB**.
+**Use it online:** https://0gring.github.io/pdf-to-epub-converter/. Drop in a `.pdf` or `.epub`, check the live
+preview, and press **Download EPUB**.
 
 To run it locally, serve the folder over HTTP (pdf.js is an ES module, which browsers won't load from `file://`):
 
@@ -48,6 +49,21 @@ Scanned pages have no text layer, only a picture of the page. The converter read
   wrong languages are ticked or the scan is low resolution.
 - OCR does not detect bold or italic, and the quality depends on the scan. 300 dpi scans work best.
 
+## Enhancing an existing EPUB
+
+Open an `.epub` instead of a PDF:
+
+- **Pages that are pictures of text** are read with OCR and replaced by real, reflowable text. This covers scanned
+  books, image-only and fixed-layout EPUBs. The text goes through the same paragraph, heading, header/footer and
+  hyphenation clean-up as a PDF, and illustrations on those pages are kept. A fixed-layout book becomes
+  reflowable, and the old page-positioning styles are removed from the pages that were replaced.
+- **Everything else is kept**: chapters, real text, the cover, the table of contents, fonts and file names.
+- **Appearance:** inverted, dark, sepia or custom colours, text size, font, line spacing and justification are added
+  as one extra stylesheet, which wins over the book's own styles. The title and author can be changed.
+- OCR modes for EPUBs: *Scanned pages only* replaces pages that are essentially a picture. *All pages* reads every
+  picture in the book, and a picture without text stays a picture.
+- Command line: `node cli.mjs book.epub --invert --lang heb` writes `book-enhanced.epub`.
+
 ## Inverted colours and reflowing zoom
 
 - **Colours:** Original, **Inverted** (white text on black), dark grey, sepia, or your own text and background colours.
@@ -82,6 +98,7 @@ Run `node cli.mjs --help` for every option.
 |---|---|
 | `pdf-extract.js` | reads the PDF with pdf.js (lines with positions, sizes and styles; pictures; bookmarks), and runs OCR on scanned pages |
 | `structure.js` | rebuilds paragraphs, headings and chapters, and removes headers and footers (no DOM, so it re-runs instantly) |
+| `epub-enhance.js` | enhances an existing EPUB: OCR of page pictures, appearance stylesheet, title and author |
 | `epub-build.js` | writes the EPUB 3 file (with an EPUB 2 NCX table of contents for older readers) |
 | `reader.js` | the paginated EPUB preview (colour themes, reflowing zoom) |
 | `app.js`, `index.html`, `style.css` | the web app |

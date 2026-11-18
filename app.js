@@ -192,10 +192,19 @@
     const keepPlace = !!frameDoc;
     status('Building the book…');
     await new Promise((r) => setTimeout(r, 0));
-    structured = PdfStructure.buildBook(extracted, settings);
-    if ($('title').value.trim()) structured.title = $('title').value.trim();
-    if ($('author').value.trim()) structured.author = $('author').value.trim();
-    const epub = await EpubBuild.buildEpub(structured, {}, { includeCover: settings.includeCover });
+    let epub;
+    if (source === 'epub') {
+      const title = $('title').value.trim() || epubAn.title;
+      const author = $('author').value.trim();
+      const r = await EpubEnhance.buildEnhanced(epubAn, epubOcrPages, settings, {}, { title, author });
+      epub = r.epub;
+      structured = { title, author, enhance: r.stats, stats: null };
+    } else {
+      structured = PdfStructure.buildBook(extracted, settings);
+      if ($('title').value.trim()) structured.title = $('title').value.trim();
+      if ($('author').value.trim()) structured.author = $('author').value.trim();
+      epub = await EpubBuild.buildEpub(structured, {}, { includeCover: settings.includeCover });
+    }
     previewBook = await R.loadEpub(epub);
     showStats();
     fillToc();
@@ -215,8 +224,24 @@
   }
 
   function showStats() {
-    const s = structured.stats;
     const n = (k, word) => `${k} ${word}${k === 1 ? '' : 's'}`;
+    if (source === 'epub') {
+      const e = structured.enhance;
+      const scans = epubAn.candidates.auto.length;
+      $('stats').textContent = `Existing EPUB: ${n(epubAn.docs.length, 'section')}` +
+        (scans ? `, ${n(scans, 'page')} that ${scans === 1 ? 'is a picture' : 'are pictures'} of text` : ', real text (no OCR needed)') +
+        (e.replaced ? ` → ${n(e.replaced, 'picture')} turned into ${n(e.paragraphs, 'paragraph')}, ${n(e.headings, 'heading')}` +
+          (e.pictures ? `, ${n(e.pictures, 'illustration')} kept` : '') : '');
+      $('scanWarn').hidden = !(scans && settings.ocrMode === 'off');
+      $('scanWarn').textContent = `${n(scans, 'page')} of this book ${scans === 1 ? 'is a picture' : 'are pictures'} of text. Turn on text recognition (OCR) below to make ${scans === 1 ? 'it' : 'them'} real, reflowable text.`;
+      const conf = epubOcrPages.length ? Math.round(epubOcrPages.reduce((a, p) => a + p.ocrConfidence, 0) / epubOcrPages.length) : null;
+      $('ocrInfo').hidden = !epubOcrPages.length;
+      $('ocrInfo').textContent = epubOcrPages.length
+        ? `${n(epubOcrPages.length, 'page')} read with OCR · average confidence ${conf}%` + (conf < 70 ? '. Low confidence: check that the right languages are ticked.' : '')
+        : '';
+      return;
+    }
+    const s = structured.stats;
     $('stats').textContent = `${n(s.pages, 'PDF page')} → ${n(structured.chapters.length, 'chapter')}, ${n(s.headings, 'heading')}, ` +
       `${n(s.paragraphs, 'paragraph')}, ${n(s.images, 'picture')}`;
     $('scanWarn').hidden = !s.scannedPages;
@@ -304,6 +329,9 @@
 
   let pdfData = null;
   let pdfPassword;
+  let source = 'pdf'; // 'pdf' = convert a PDF; 'epub' = enhance an existing EPUB
+  let epubAn = null; // the opened EPUB (epub-enhance.js)
+  let epubOcrPages = []; // its pictures read with OCR
   let extractRun = 0;
 
   function ocrOptions() {
@@ -313,6 +341,15 @@
   // Reads the PDF (and runs OCR where needed). Returns false if a newer run replaced this one.
   async function extract() {
     const run = ++extractRun;
+    if (source === 'epub') {
+      const onProgress = (f, msg) => { if (run === extractRun) status(`${msg} (${Math.round(f * 100)}%)`); };
+      if (!epubAn) epubAn = await EpubEnhance.openEpub(pdfData.slice());
+      const ocrPages = settings.ocrMode === 'off' ? [] : await EpubEnhance.ocrEpub(epubAn, { ocr: ocrOptions(), onProgress });
+      if (run !== extractRun) return false;
+      epubOcrPages = ocrPages;
+      extracted = { epub: true };
+      return true;
+    }
     for (;;) {
       try {
         const result = await PdfExtract.extractPdf(pdfData.slice(), {
@@ -335,15 +372,21 @@
 
   async function open(file) {
     if (!file) return;
+    $('download').disabled = true; // nothing to save until the new file is ready
     try {
       status(`Opening ${file.name}…`);
       pdfData = new Uint8Array(await file.arrayBuffer());
       pdfPassword = undefined;
+      // an EPUB is a ZIP file ("PK"); a PDF starts with "%PDF"
+      source = /\.epub$/i.test(file.name) || (pdfData[0] === 0x50 && pdfData[1] === 0x4b) ? 'epub' : 'pdf';
+      epubAn = null;
+      epubOcrPages = [];
+      document.body.dataset.source = source;
       $('download').disabled = true;
       if (!(await extract())) return;
-      fileName = file.name.replace(/\.pdf$/i, '');
-      $('title').value = extracted.title || '';
-      $('author').value = extracted.author || '';
+      fileName = file.name.replace(/\.(pdf|epub)$/i, '');
+      $('title').value = (source === 'epub' ? epubAn.title : extracted.title) || '';
+      $('author').value = (source === 'epub' ? epubAn.author : extracted.author) || '';
       $('bookInfo').hidden = false;
       frameDoc = null;
       pages = 1;
@@ -354,7 +397,7 @@
         structured.title = $('title').value;
       }
       $('bookTitle').textContent = structured.author ? `${structured.title} — ${structured.author}` : structured.title;
-      document.title = `${structured.title} · PDF to EPUB`;
+      document.title = `${structured.title} · ${source === 'epub' ? 'Enhance EPUB' : 'PDF to EPUB'}`;
     } catch (err) {
       console.error(err);
       status(`Could not convert this file: ${err.message || err}`);
@@ -364,8 +407,9 @@
   // OCR settings changed: read the PDF again (only when it makes a difference).
   async function rerunOcr(previousMode) {
     if (!pdfData || !extracted) return;
-    const affected = settings.ocrMode === 'all' || previousMode === 'all' ||
-      extracted.pages.some((p) => p.ocr || p.scanned);
+    const affected = source === 'epub'
+      ? epubAn.candidates.all.length > 0
+      : settings.ocrMode === 'all' || previousMode === 'all' || extracted.pages.some((p) => p.ocr || p.scanned);
     if (!affected) return;
     try {
       $('download').disabled = true;
@@ -388,7 +432,7 @@
   // ---- export -----------------------------------------------------------------------------------------------
   async function download() {
     if (!structured) return;
-    status('Writing the EPUB…');
+    status(source === 'epub' ? 'Writing the enhanced EPUB…' : 'Writing the EPUB…');
     try {
       const book = Object.assign({}, structured, {
         title: $('title').value.trim() || structured.title,
@@ -397,7 +441,9 @@
       const appearance = settings.bake
         ? { theme: settings.theme, fg: settings.fg, bg: settings.bg, invertImages: settings.invertImages, zoom: settings.zoom, font: settings.font, lineHeight: settings.lineHeight, justify: settings.justify }
         : {};
-      const blob = await EpubBuild.buildEpub(book, appearance, { includeCover: settings.includeCover, type: 'blob' });
+      const blob = source === 'epub'
+        ? (await EpubEnhance.buildEnhanced(epubAn, epubOcrPages, settings, appearance, { title: book.title, author: book.author }, { type: 'blob' })).epub
+        : await EpubBuild.buildEpub(book, appearance, { includeCover: settings.includeCover, type: 'blob' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = `${(book.title || fileName).replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 120) || 'book'}.epub`;

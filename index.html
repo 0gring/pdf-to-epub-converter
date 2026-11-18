@@ -10,6 +10,7 @@
   <script src="pdf-extract.js" defer></script>
   <script src="structure.js" defer></script>
   <script src="epub-build.js" defer></script>
+  <script src="epub-enhance.js" defer></script>
   <script src="reader.js" defer></script>
   <script src="app.js" defer></script>
 </head>
@@ -17,8 +18,8 @@
   <header class="top">
     <h1>PDF <span aria-hidden="true">→</span> EPUB</h1>
     <p class="book-title" id="bookTitle">No file open</p>
-    <label class="btn" for="file">Open PDF…</label>
-    <input type="file" id="file" accept=".pdf,application/pdf" hidden>
+    <label class="btn" for="file">Open PDF or EPUB…</label>
+    <input type="file" id="file" accept=".pdf,.epub,application/pdf,application/epub+zip" hidden>
     <button class="btn primary" id="download" disabled>Download EPUB</button>
   </header>
 
@@ -124,9 +125,9 @@
         <label class="check"><input type="checkbox" id="removeHeadersFooters" checked> Remove page headers, footers &amp; numbers</label>
         <label class="check"><input type="checkbox" id="joinHyphens" checked> Re-join words hyphenated at line ends</label>
         <label class="check"><input type="checkbox" id="detectHeadings" checked> Detect headings &amp; chapters</label>
-        <label class="check"><input type="checkbox" id="useOutline" checked> Use the PDF's bookmarks as chapters</label>
+        <label class="check pdf-only"><input type="checkbox" id="useOutline" checked> Use the PDF's bookmarks as chapters</label>
         <label class="check"><input type="checkbox" id="keepImages" checked> Keep pictures</label>
-        <label class="check"><input type="checkbox" id="includeCover" checked> Cover from the first page</label>
+        <label class="check pdf-only"><input type="checkbox" id="includeCover" checked> Cover from the first page</label>
       </section>
 
       <section>
@@ -144,7 +145,8 @@
       <div class="dropzone" id="dropzone">
         <div>
           <p class="big-icon" aria-hidden="true">📄</p>
-          <p><b>Drop a PDF here</b> or use <b>Open PDF…</b></p>
+          <p><b>Drop a PDF or EPUB here</b> or use <b>Open PDF or EPUB…</b></p>
+          <p class="hint">A PDF is converted into an EPUB. An existing EPUB is enhanced: pages that are pictures of text are read with OCR, and you can change its colours, text size, font, title and author.</p>
           <p class="hint">Your file never leaves your device: everything runs in this browser tab.</p>
         </div>
       </div>
