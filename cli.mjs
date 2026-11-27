@@ -32,6 +32,7 @@ Appearance saved into the EPUB:
 Text recognition (OCR) for scanned PDFs:
   --ocr <mode>              auto (scanned pages only) | all (every page) | off             [auto]
   --lang <codes>            OCR languages joined by +, e.g. eng, heb, heb+eng, fra, ara    [eng]
+  --no-ocr-correct          keep OCR output as read (no look-alike letter fixes from the book's own words)
   --lang-dir <dir>          offline: folder with <lang>.traineddata.gz files (default: download)
 
 Conversion:
@@ -73,6 +74,7 @@ function parseArgs(argv) {
       case '--lang': case '--langs': ocr.langs = next(); break;
       case '--lang-dir': ocr.langDir = path.resolve(next()); break;
       case '--keep-headers': conv.removeHeadersFooters = false; break;
+      case '--no-ocr-correct': conv.ocrCorrect = false; break;
       case '--no-join-hyphens': conv.joinHyphens = false; break;
       case '--no-headings': conv.detectHeadings = false; break;
       case '--no-outline': conv.useOutline = false; break;

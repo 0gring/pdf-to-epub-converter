@@ -4,6 +4,7 @@
   'use strict';
 
   const DEFAULTS = {
+    ocrCorrect: true,
     removeHeadersFooters: true,
     detectHeadings: true,
     joinHyphens: true,
@@ -21,6 +22,7 @@
   function buildBook(doc, options) {
     const o = Object.assign({}, DEFAULTS, options);
     const pages = doc.pages;
+    if (pages.some((p) => p.ocr)) correctOcr(pages, o.ocrCorrect);
 
     // ---- body text size (the size most characters use) --------------------------------------------------------
     const sizeChars = new Map();
@@ -28,29 +30,7 @@
     const bodySize = sizeChars.size ? [...sizeChars.entries()].sort((a, b) => b[1] - a[1])[0][0] : 11;
 
     // ---- running headers / footers and page numbers -----------------------------------------------------------
-    const drop = new Set();
-    if (o.removeHeadersFooters) {
-      const zone = (p, l) => (l.bottom < p.height * 0.1 ? 'top' : l.top > p.height * 0.9 ? 'bottom' : null);
-      const seen = new Map();
-      pages.forEach((p) => {
-        const keys = new Set();
-        for (const l of p.lines) {
-          const z = zone(p, l);
-          if (!z) continue;
-          const key = `${z}|${l.text.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().toLowerCase()}`;
-          if (!keys.has(key)) { keys.add(key); seen.set(key, (seen.get(key) || 0) + 1); }
-        }
-      });
-      const minRepeats = Math.max(2, Math.ceil(pages.length * 0.3));
-      for (const p of pages) {
-        for (const l of p.lines) {
-          const z = zone(p, l);
-          if (!z) continue;
-          const key = `${z}|${l.text.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().toLowerCase()}`;
-          if ((pages.length >= 3 && seen.get(key) >= minRepeats) || PAGE_NUMBER.test(l.text)) drop.add(l);
-        }
-      }
-    }
+    const drop = o.removeHeadersFooters ? findHeadersFooters(pages) : new Set();
 
     // ---- typical line spacing (relative to the font size) --------------------------------------------------------
     const gaps = [];
@@ -274,6 +254,178 @@
     }
 
     return splitChapters(merged, doc, o);
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  // Running headers and footers. A line at the top or bottom edge of a page is dropped when
+  //  - it is just a page number, or
+  //  - it carries the page number (the number minus the page index is the same on many pages), or
+  //  - similar text (fuzzy, so OCR misreadings still match) repeats at that edge on many pages, or on a few pages
+  //    while standing apart from the text below/above it (chapter-title headers that change every chapter).
+  const NIQQUD = /[֑-ׇ]/g;
+  // letters OCR confuses map to one representative, so "הנא" and "הוא" give the same header key
+  const LOOKALIKE = { 'נ': 'ו', 'ן': 'ו', 'ז': 'ו', 'י': 'ו', 'ג': 'ו', 'כ': 'ב', 'ך': 'ב', 'ר': 'ד', 'ת': 'ח', 'ה': 'ח', 'ם': 'ס', 'פ': 'ס', 'ף': 'ס', 'ט': 'מ', 'ץ': 'צ', 'ע': 'צ' };
+  const headerKey = (t) => t.replace(NIQQUD, '').toLowerCase().replace(/[^\p{L}]/gu, '').replace(/./g, (c) => LOOKALIKE[c] || c);
+
+  function similarity(a, b) {
+    if (a === b) return 1;
+    if (!a.length || !b.length) return 0;
+    let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+      const cur = [i];
+      for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+    return 1 - prev[b.length] / Math.max(a.length, b.length);
+  }
+
+  function findHeadersFooters(pages) {
+    const drop = new Set();
+    const sizeChars = new Map();
+    for (const p of pages) for (const l of p.lines) { const k = Math.round(l.size * 2) / 2; sizeChars.set(k, (sizeChars.get(k) || 0) + l.text.length); }
+    const bodySize = sizeChars.size ? [...sizeChars.entries()].sort((a, b) => b[1] - a[1])[0][0] : 11;
+    const cands = [];
+    pages.forEach((p, pi) => {
+      const ls = [...p.lines].sort((a, b) => a.top - b.top);
+      if (!ls.length) return;
+      const add = (l, zone, neighbour) => {
+        const gap = neighbour ? (zone === 'top' ? neighbour.top - l.bottom : l.top - neighbour.bottom) : 99;
+        cands.push({
+          l, pi, zone, key: headerKey(l.text),
+          nums: (l.text.match(/\d{1,4}/g) || []).map(Number),
+          short: l.text.length < 90,
+          small: l.size <= bodySize * 1.1,
+          apart: gap > Math.min(l.size, neighbour ? neighbour.size : l.size) * 0.9,
+        });
+      };
+      for (let i = 0; i < Math.min(2, ls.length); i++) if (ls[i].top < p.height * 0.14) add(ls[i], 'top', ls[i + 1]);
+      for (let i = ls.length - 1; i >= Math.max(0, ls.length - 2); i--) if (ls[i].bottom > p.height * 0.86) add(ls[i], 'bottom', ls[i - 1]);
+    });
+
+    // page numbers: printed number minus page index is constant across the book
+    const offsets = new Map();
+    for (const c of cands) for (const n of new Set(c.nums)) { const k = n - (c.pi + 1); offsets.set(k, (offsets.get(k) || 0) + 1); }
+    const best = [...offsets.entries()].sort((a, b) => b[1] - a[1])[0];
+    const numbered = best && best[1] >= Math.max(3, pages.length * 0.25) ? best[0] : null;
+
+    // fuzzy clusters of header/footer text, per edge
+    const clusters = [];
+    for (const c of cands) {
+      if (c.key.length < 2) continue;
+      let cl = clusters.find((x) => x.zone === c.zone && similarity(x.key, c.key) >= 0.75);
+      if (!cl) { cl = { zone: c.zone, key: c.key, pages: new Set() }; clusters.push(cl); }
+      cl.pages.add(c.pi);
+      c.cluster = cl;
+    }
+    const many = Math.max(3, pages.length * 0.25);
+    for (const c of cands) {
+      const reps = c.cluster ? c.cluster.pages.size : 0;
+      if (PAGE_NUMBER.test(c.l.text) ||
+          (numbered !== null && c.short && c.nums.some((n) => n - (c.pi + 1) === numbered)) ||
+          // the book prints page numbers in its headers/footers, but OCR misread this one's digits
+          (numbered !== null && c.short && c.small && c.apart && c.nums.length > 0) ||
+          (pages.length >= 3 && reps >= many) ||
+          (reps >= 3 && c.short && c.apart)) {
+        drop.add(c.l);
+      }
+    }
+    return drop;
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  // Book dictionary for OCR text. OCR confuses look-alike letters (ו/נ, ב/כ, ח/ת, ד/ר...) at random places, while
+  // the correct spelling of a word appears many more times in the same book. A rarely seen word that becomes a
+  // much more frequent word of the book by fixing one look-alike letter is corrected. Words that are common in
+  // both spellings (אחד/אחר) are left alone, and confident readings need much stronger evidence.
+  const HEB_PAIRS = ['ונ', 'וז', 'וי', 'ור', 'ון', 'בכ', 'דר', 'חת', 'חה', 'הת', 'נג', 'סם', 'ספ', 'טמ', 'עצ', 'כנ'];
+  const LAT_PAIRS = [['rn', 'm'], ['cl', 'd'], ['vv', 'w'], ['li', 'h'], ['l', 'i'], ['e', 'c'], ['l', '1'], ['o', '0'], ['u', 'n'], ['h', 'b']];
+  const FINAL = { 'כ': 'ך', 'מ': 'ם', 'נ': 'ן', 'פ': 'ף', 'צ': 'ץ' };
+  const UNFINAL = { 'ך': 'כ', 'ם': 'מ', 'ן': 'נ', 'ף': 'פ', 'ץ': 'צ' };
+  const HEB_SWAP = new Map();
+  for (const [a, b] of HEB_PAIRS) {
+    if (!HEB_SWAP.has(a)) HEB_SWAP.set(a, new Set());
+    if (!HEB_SWAP.has(b)) HEB_SWAP.set(b, new Set());
+    HEB_SWAP.get(a).add(b);
+    HEB_SWAP.get(b).add(a);
+  }
+  const fixFinals = (w) => w.replace(/[ךםןףץ](?=.)/g, (c) => UNFINAL[c]).replace(/[כמנפצ]$/, (c) => FINAL[c]);
+  const splitToken = (t) => { const m = t.match(/^([^\p{L}\p{N}]*)(.*?)([^\p{L}\p{N}]*)$/su); return m ? [m[1], m[2], m[3]] : ['', t, '']; };
+
+  function variants(w) {
+    const out = new Set();
+    if (/[א-ת]/.test(w)) {
+      const base = w.replace(/[ךםןףץ]/g, (c) => UNFINAL[c]);
+      for (let i = 0; i < base.length; i++) {
+        for (const r of HEB_SWAP.get(base[i]) || []) out.add(fixFinals(base.slice(0, i) + r + base.slice(i + 1)));
+      }
+      // a quote mark read as extra י/ו in front of a word (״ -> יי), or a doubled letter (הווא)
+      if (/^[יו]/.test(base) && base.length > 3) out.add(fixFinals(base.slice(1)));
+      if (/^[יו]{2}/.test(base) && base.length > 4) out.add(fixFinals(base.slice(2)));
+      for (let i = 0; i + 1 < base.length; i++) if (base[i] === base[i + 1]) out.add(fixFinals(base.slice(0, i) + base.slice(i + 1)));
+    } else if (/^[a-z0-9]+$/i.test(w)) {
+      const lw = w.toLowerCase();
+      for (const [a, b] of LAT_PAIRS) {
+        for (const [x, y] of [[a, b], [b, a]]) {
+          for (let i = lw.indexOf(x); i >= 0; i = lw.indexOf(x, i + 1)) out.add(lw.slice(0, i) + y + lw.slice(i + x.length));
+        }
+      }
+    }
+    out.delete(w);
+    return out;
+  }
+
+  function correctOcr(pages, enabled) {
+    const lines = pages.flatMap((p) => p.lines);
+    for (const l of lines) {
+      if (!l.ocr) continue;
+      if (l.ocrOriginal === undefined) l.ocrOriginal = l.text;
+      l.text = l.ocrOriginal; // start from what OCR read, so switching the option off restores it
+      l.runs = [Object.assign({}, l.runs[0], { text: l.text })];
+    }
+    if (!enabled) return;
+    const keyOf = (w) => { const k = w.replace(NIQQUD, ''); return /[a-z]/i.test(k) && !/[א-ת]/.test(k) ? k.toLowerCase() : k; };
+    const freq = new Map();
+    const trusted = new Set(); // read with high confidence at least once (or from a real text layer): a real word
+    for (const l of lines) {
+      l.text.split(/\s+/).forEach((t, i) => {
+        const k = keyOf(splitToken(t)[1]);
+        if (k.length < 2) return;
+        freq.set(k, (freq.get(k) || 0) + 1);
+        if (!l.ocr || (l.wconf && l.wconf[i] >= 92)) trusted.add(k);
+      });
+    }
+    const fixes = new Map();
+    for (const l of lines) {
+      if (!l.ocr) continue;
+      const tokens = l.text.split(' ');
+      let changed = false;
+      tokens.forEach((t, i) => {
+        const [pre, word, post] = splitToken(t);
+        const k = keyOf(word);
+        if (k.length < 2 || trusted.has(k)) return;
+        const fk = freq.get(k) || 0;
+        const conf = l.wconf && l.wconf[i] !== undefined ? l.wconf[i] : 70;
+        let fix = fixes.get(k);
+        if (fix === undefined) {
+          fix = null;
+          let bestCount = 0;
+          for (const v of variants(k)) { const c = freq.get(v) || 0; if (c > bestCount) { bestCount = c; fix = v; } }
+          if (!(bestCount >= 3 && bestCount >= 5 * fk)) fix = null;
+          else fix = { to: fix, count: bestCount };
+          fixes.set(k, fix);
+        }
+        if (fix && (conf < 90 || fix.count >= 20 * fk)) {
+          let to = fix.to;
+          if (/^[A-Z]/.test(word)) to = to[0].toUpperCase() + to.slice(1);
+          tokens[i] = pre + to + post;
+          changed = true;
+        }
+      });
+      if (changed) {
+        l.text = tokens.join(' ');
+        l.runs = [Object.assign({}, l.runs[0], { text: l.text })];
+      }
+    }
   }
 
   function splitChapters(blocks, doc, o) {

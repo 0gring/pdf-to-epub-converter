@@ -293,6 +293,7 @@
           workerPath: `${BASE}vendor/tesseract/worker.min.js`,
           corePath: `${BASE}vendor/tesseract/`,
           ...(o.ocr.langPath ? { langPath: o.ocr.langPath } : {}), // default: jsDelivr, cached in the browser
+          ...(o.ocr.workerOptions || {}),
           logger: (m) => {
             const pl = o.pageLabel || { n: 1, total: 1 };
             if (/recogniz/.test(m.status)) {
@@ -358,7 +359,7 @@
         }
       }
 
-      const ordered = splitColumns(raw);
+      const ordered = splitColumns(splitRows(raw));
       const lines = [];
       let confSum = 0;
       let confChars = 0;
@@ -383,6 +384,7 @@
           rtl: count(text, RTL_CHARS) > count(text, LTR_CHARS),
           ocr: true,
           conf,
+          wconf: seg.words.map((w) => w.conf), // per word, in the order of `text` (used by the book dictionary)
         });
       }
 
@@ -442,6 +444,35 @@
       });
       return { lines: lines.filter((l) => !inPicture(l)), images, confidence: confChars ? confSum / confChars : 0 };
     }
+  }
+
+  // Tesseract sometimes joins words at different heights into one line (typically a running header glued
+  // onto the first line of text). Split such lines by the vertical position of their words.
+  function splitRows(raw) {
+    const out = [];
+    for (const l of raw) {
+      const hs = l.words.map((w) => w.y1 - w.y0).sort((a, b) => a - b);
+      const h = hs[Math.floor(hs.length / 2)] || l.rowH;
+      const byY = [...l.words].sort((a, b) => (a.y0 + a.y1) - (b.y0 + b.y1));
+      const groups = [[byY[0]]];
+      for (let i = 1; i < byY.length; i++) {
+        const prev = groups[groups.length - 1];
+        const cy = (byY[i].y0 + byY[i].y1) / 2;
+        const py = (prev[prev.length - 1].y0 + prev[prev.length - 1].y1) / 2;
+        if (cy - py > h * 0.8) groups.push([]);
+        groups[groups.length - 1].push(byY[i]);
+      }
+      if (groups.length === 1) { out.push(l); continue; }
+      for (const g of groups) {
+        const set = new Set(g);
+        const words = l.words.filter((w) => set.has(w)); // keep reading order
+        const y0 = Math.min(...words.map((w) => w.y0));
+        const y1 = Math.max(...words.map((w) => w.y1));
+        const gh = words.map((w) => w.y1 - w.y0).sort((a, b) => a - b);
+        out.push(Object.assign({}, l, { words, y0, y1, base: y1 - (y1 - y0) * 0.2, rowH: Math.max(gh[Math.floor(gh.length / 2)] * 1.15, 1) }));
+      }
+    }
+    return out;
   }
 
   // Tesseract often reads narrow-gutter columns as one wide line. Find gutters (word gaps that recur at the

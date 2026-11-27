@@ -19,7 +19,7 @@
   let frameDoc = null;
 
   // ---- settings ---------------------------------------------------------------------------------------------
-  const CONVERSION_KEYS = ['removeHeadersFooters', 'joinHyphens', 'detectHeadings', 'useOutline', 'keepImages'];
+  const CONVERSION_KEYS = ['removeHeadersFooters', 'joinHyphens', 'detectHeadings', 'useOutline', 'keepImages', 'ocrCorrect'];
   // OCR language guessed from the browser's language; the reader can tick more
   const UI_LANG_TO_OCR = {
     he: 'heb', iw: 'heb', ar: 'ara', ru: 'rus', uk: 'ukr', fr: 'fra', de: 'deu', es: 'spa', it: 'ita', pt: 'por',
@@ -223,6 +223,14 @@
     status('');
   }
 
+  // Mixing English into OCR of a Hebrew/Arabic book makes look-alike letters worse (and can reorder lines).
+  function langTip(rtlBook) {
+    const langs = settings.ocrLangs.split('+');
+    return rtlBook && langs.length > 1 && langs.includes('eng')
+      ? ' Tip: this book is right-to-left; unless it really mixes in English text, untick English for more accurate recognition.'
+      : '';
+  }
+
   function showStats() {
     const n = (k, word) => `${k} ${word}${k === 1 ? '' : 's'}`;
     if (source === 'epub') {
@@ -237,7 +245,8 @@
       const conf = epubOcrPages.length ? Math.round(epubOcrPages.reduce((a, p) => a + p.ocrConfidence, 0) / epubOcrPages.length) : null;
       $('ocrInfo').hidden = !epubOcrPages.length;
       $('ocrInfo').textContent = epubOcrPages.length
-        ? `${n(epubOcrPages.length, 'page')} read with OCR · average confidence ${conf}%` + (conf < 70 ? '. Low confidence: check that the right languages are ticked.' : '')
+        ? `${n(epubOcrPages.length, 'page')} read with OCR · average confidence ${conf}%` + (conf < 70 ? '. Low confidence: check that the right languages are ticked.' : '') +
+          langTip(epubOcrPages.flatMap((p) => p.lines).filter((l) => l.rtl).length > epubOcrPages.flatMap((p) => p.lines).length / 2)
         : '';
       return;
     }
@@ -251,7 +260,7 @@
     $('ocrInfo').hidden = !s.ocrPages;
     $('ocrInfo').textContent = s.ocrPages
       ? `${n(s.ocrPages, 'page')} read with OCR · average confidence ${s.ocrConfidence}%` +
-        (s.ocrConfidence < 70 ? '. Low confidence: check that the right languages are ticked.' : '')
+        (s.ocrConfidence < 70 ? '. Low confidence: check that the right languages are ticked.' : '') + langTip(structured.rtl)
       : '';
   }
 

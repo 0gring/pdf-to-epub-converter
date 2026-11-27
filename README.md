@@ -47,6 +47,16 @@ Scanned pages have no text layer, only a picture of the page. The converter read
   dropped.
 - The app shows how many pages were read with OCR and the average confidence. Low confidence usually means the
   wrong languages are ticked or the scan is low resolution.
+- **Book dictionary:** OCR mixes up look-alike letters at random places (Hebrew ו/נ, ב/כ, ח/ת, ד/ר, נ/ג; Latin
+  rn/m, cl/d…). The correct spelling of a word appears many more times in the same book, so a rare word that becomes
+  one of the book's frequent words by fixing one look-alike letter is corrected. Words read with high confidence,
+  and pairs that are both common (אחד/אחר), are left alone. You can switch it off with *Fix look-alike letters…*.
+- **Running headers and footers** are removed even when they alternate (book title and chapter title) or OCR misreads
+  them. The app recognises them by the page number they carry, by fuzzy matching of repeated text at the top or
+  bottom edge, and by how they stand apart from the text. A header that OCR glued onto the first line of text is
+  separated first.
+- For Hebrew or Arabic books, tick only that language. Adding English makes look-alike letters worse, and the app
+  points this out.
 - OCR does not detect bold or italic, and the quality depends on the scan. 300 dpi scans work best.
 
 ## Enhancing an existing EPUB
