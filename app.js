@@ -8,6 +8,7 @@
   const R = window.EpubReader;
   const MM = R.MM;
   const STORE_KEY = 'pdf-to-epub-settings';
+  const VERSION = '2026-11-27b'; // shown in the panel, so it is clear which version ran
 
   let extracted = null; // raw lines/pictures from the PDF (kept so conversion options re-run instantly)
   let structured = null; // book structure for the EPUB
@@ -253,10 +254,22 @@
     const s = structured.stats;
     $('stats').textContent = `${n(s.pages, 'PDF page')} → ${n(structured.chapters.length, 'chapter')}, ${n(s.headings, 'heading')}, ` +
       `${n(s.paragraphs, 'paragraph')}, ${n(s.images, 'picture')}`;
+    if (s.hiddenTextPages && settings.ocrMode !== 'all' && !s.scannedPages) {
+      $('scanWarn').hidden = false;
+      $('scanWarn').textContent = `${n(s.hiddenTextPages, 'page')} ${s.hiddenTextPages === 1 ? 'is a scan' : 'are scans'} that already ` +
+        'contain text from another OCR program. That text is used (and corrected with the book dictionary). If it still has ' +
+        "many errors, set Text recognition to \"All pages\" so this app's OCR reads the pages again.";
+      return showOcrInfo(s);
+    }
     $('scanWarn').hidden = !s.scannedPages;
     $('scanWarn').textContent = s.scannedPages
       ? `${n(s.scannedPages, 'page')} ${s.scannedPages === 1 ? 'has' : 'have'} no text layer (scanned) and ${s.scannedPages === 1 ? 'is' : 'are'} kept as ${s.scannedPages === 1 ? 'a picture' : 'pictures'}. Turn on text recognition (OCR) below to turn them into reflowable text.`
       : '';
+    showOcrInfo(s);
+  }
+
+  function showOcrInfo(s) {
+    const n = (k, word) => `${k} ${word}${k === 1 ? '' : 's'}`;
     $('ocrInfo').hidden = !s.ocrPages;
     $('ocrInfo').textContent = s.ocrPages
       ? `${n(s.ocrPages, 'page')} read with OCR · average confidence ${s.ocrConfidence}%` +
@@ -528,8 +541,54 @@
   $('stage').addEventListener('wheel', onWheel, { passive: false });
   document.addEventListener('keydown', onKey);
   $('download').addEventListener('click', download);
+
+  // ---- diagnostic report: what the header/footer detector saw on a few pages ----------------------------------
+  function diagnosticReport(pageNo) {
+    const lines = [`PDF to EPUB ${VERSION} · diagnostic report`];
+    const st = structured && structured.stats;
+    if (source === 'epub') lines.push('Source: EPUB'); else if (st) {
+      lines.push(`Pages ${st.pages} · OCR pages ${st.ocrPages || 0} · scans with own text layer ${st.hiddenTextPages || 0} · scanned without text ${st.scannedPages || 0}` +
+        (st.ocrConfidence ? ` · OCR confidence ${st.ocrConfidence}%` : ''));
+    }
+    lines.push(`Settings: OCR ${settings.ocrMode} (${settings.ocrLangs}) · remove headers ${settings.removeHeadersFooters} · dictionary ${settings.ocrCorrect}`);
+    const d = structured && structured.headerDiag;
+    if (!d) { lines.push('No header/footer data (header removal is off, or this is an EPUB without OCR).'); return lines.join('\n'); }
+    lines.push(`Page-number pattern: ${d.numbered === null ? `none (best guess had ${d.numberedVotes} pages)` : `printed number = PDF page ${d.numbered >= 0 ? '+' : ''}${d.numbered} (${d.numberedVotes} pages)`}; body text size ${d.bodySize}`);
+    lines.push('Most repeated edge lines:');
+    for (const c of d.clusters) lines.push(`  ${c.zone} ×${c.pages}: ${c.sample.slice(0, 60)}`);
+    const pagesArr = extracted && extracted.pages;
+    for (let pi = Math.max(0, pageNo - 2); pi <= Math.min((pagesArr || []).length - 1, pageNo); pi++) {
+      const pg = pagesArr[pi];
+      lines.push(`--- PDF page ${pi + 1}${pg.ocr ? ' (OCR)' : pg.hiddenTextLayer ? ' (scan + own text layer)' : ''} · height ${Math.round(pg.height)}`);
+      const ls = [...pg.lines].sort((a, b) => a.top - b.top);
+      const show = [...ls.slice(0, 3), null, ...ls.slice(-3)];
+      for (const l of show) {
+        if (!l) { lines.push('  …'); continue; }
+        const c = d.cands.find((x) => x.l === l);
+        const verdict = d.why.get(l) ? `REMOVED: ${d.why.get(l)}` : c ? `kept (edge line; repeats on ${c.reps} pages${c.apart ? ', apart' : ''}${c.nums.length ? `, numbers ${c.nums.join(',')}` : ''})` : 'kept (text)';
+        lines.push(`  [${Math.round((l.top / pg.height) * 100)}%–${Math.round((l.bottom / pg.height) * 100)}%, size ${l.size}] ${l.text.slice(0, 70)}  → ${verdict}`);
+      }
+    }
+    return lines.join('\n');
+  }
+  $('diagBtn').addEventListener('click', () => {
+    if (!structured) { status('Open a file first.'); return; }
+    const total = (extracted && extracted.pages && extracted.pages.length) || 1;
+    const ans = window.prompt(`PDF page number where a header or footer was not removed (1–${total}):`, '1');
+    if (ans === null) return;
+    const pageNo = Math.min(total, Math.max(1, parseInt(ans, 10) || 1));
+    $('diagText').value = diagnosticReport(pageNo);
+    $('diagDialog').showModal();
+  });
+  $('diagCopy').addEventListener('click', async () => {
+    const t = $('diagText');
+    try { await navigator.clipboard.writeText(t.value); $('diagCopy').textContent = 'Copied'; } catch (_) { t.select(); document.execCommand('copy'); $('diagCopy').textContent = 'Copied'; }
+    setTimeout(() => { $('diagCopy').textContent = 'Copy'; }, 1500);
+  });
+  $('diagClose').addEventListener('click', () => $('diagDialog').close());
   window.addEventListener('resize', () => { if (frameDoc) layoutSheet(); });
 
   syncControls();
+  $('version').textContent = `Version ${VERSION}`;
   window.PdfToEpubApp = { open, settings, update, goTo, get pages() { return pages; }, get page() { return page; }, get book() { return structured; } };
 })();

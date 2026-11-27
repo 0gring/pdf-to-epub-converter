@@ -32,6 +32,7 @@
         <p class="stats" id="stats"></p>
         <p class="warn" id="scanWarn" hidden></p>
         <p class="ok" id="ocrInfo" hidden></p>
+        <button class="btn small" id="diagBtn" type="button">Diagnostic report…</button>
       </section>
 
       <section>
@@ -140,6 +141,7 @@
           <input type="range" id="margin" min="0" max="30" step="1" value="6">
         </label>
       </section>
+      <p class="version" id="version"></p>
     </aside>
 
     <section class="viewer" id="viewer" aria-label="Preview">
@@ -168,5 +170,15 @@
       <div class="status" id="status" role="status" hidden></div>
     </section>
   </main>
+
+  <dialog id="diagDialog" aria-labelledby="diagTitle">
+    <h2 id="diagTitle">Diagnostic report</h2>
+    <p class="hint">What the converter found at the top and bottom of these pages, and why each line was kept or removed. Copy it and paste it in the chat.</p>
+    <textarea id="diagText" readonly rows="16"></textarea>
+    <div class="dialog-buttons">
+      <button class="btn primary" id="diagCopy" type="button">Copy</button>
+      <button class="btn" id="diagClose" type="button">Close</button>
+    </div>
+  </dialog>
 </body>
 </html>

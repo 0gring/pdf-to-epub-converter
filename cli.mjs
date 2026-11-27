@@ -173,6 +173,7 @@ try {
     console.log(`Saved ${args.out} (${(out.length / 1024).toFixed(0)} KB): "${result.title}", ${s.pages} pages -> ` +
       `${result.chapters} chapters, ${s.headings} headings, ${s.paragraphs} paragraphs, ${s.images} pictures`);
     if (s.ocrPages) console.log(`OCR: ${s.ocrPages} page(s) recognised, average confidence ${s.ocrConfidence}%.`);
+    if (s.hiddenTextPages && args.ocr.mode !== 'all') console.log(`Note: ${s.hiddenTextPages} page(s) are scans with a text layer from another OCR program; that text was used. If it has many errors, use --ocr all.`);
     if (s.scannedPages) console.log(`Note: ${s.scannedPages} page(s) have no text layer (scanned) and were kept as pictures (use --ocr auto).`);
   }
 } catch (err) {

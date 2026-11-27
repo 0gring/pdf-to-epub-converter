@@ -55,6 +55,14 @@ Scanned pages have no text layer, only a picture of the page. The converter read
   them. The app recognises them by the page number they carry, by fuzzy matching of repeated text at the top or
   bottom edge, and by how they stand apart from the text. A header that OCR glued onto the first line of text is
   separated first.
+- **Scans that already have a hidden text layer** (made by another OCR program when the book was scanned, which is
+  common in scanned books) are detected. With *Scanned pages only*, that text is used and corrected with the book
+  dictionary, and the app says so. If it still has many errors, choose *All pages* to read the pages again with this
+  app's OCR.
+- Words split at a line end with a Hebrew maqaf (מכסה־ / המנוע) are joined, even when OCR read the maqaf as ך.
+- **Diagnostic report** (button under the book details): for a page you choose, it lists what the converter found at
+  the top and bottom of that page and the neighbouring ones, and why each line was kept or removed. It's short enough to
+  paste into a bug report.
 - For Hebrew or Arabic books, tick only that language. Adding English makes look-alike letters worse, and the app
   points this out.
 - OCR does not detect bold or italic, and the quality depends on the scan. 300 dpi scans work best.

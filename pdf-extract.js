@@ -224,6 +224,10 @@
 
     const pageArea = vp.width * vp.height;
     const scanned = textChars < 20;
+    // A page picture under real text: a scan whose text layer was made by some other OCR program. That text
+    // is kept (fast), but it may contain OCR errors, so it is marked for the book dictionary.
+    const hiddenTextLayer = !scanned && merged.some((b) => (b.right - b.left) * (b.bottom - b.top) >= pageArea * 0.8);
+    if (hiddenTextLayer) for (const l of outLines) l.ocrish = true;
     let pics = merged.filter((b) => {
       const area = (b.right - b.left) * (b.bottom - b.top);
       // a picture covering the whole page behind real text is a background (or a scan with a text layer)
@@ -258,7 +262,7 @@
       canvas.width = canvas.height = 0;
     }
 
-    return { width: vp.width, height: vp.height, rotation, lines: outLines, images: pics, scanned };
+    return { width: vp.width, height: vp.height, rotation, lines: outLines, images: pics, scanned, hiddenTextLayer };
   }
 
   // ---------------------------------------------------------------------------------------------------------

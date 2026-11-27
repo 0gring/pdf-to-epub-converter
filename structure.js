@@ -17,12 +17,24 @@
   const norm = (s) => s.toLowerCase().replace(/[\d\s.,;:!?'"“”‘’()[\]\-–—_]+/g, '');
   const SENTENCE_END = /[.!?:;"”’»)\]…。！？]$/;
   const BULLET = /^([•●○◦▪▫■□‣⁃∙·*–—-]\s|\(?\d{1,3}[.)]\s|\(?[a-z][.)]\s|[ivx]{1,4}[.)]\s)/i;
+  const CHAPTER_WORD = /^(פרק|חלק|ספר|שער|הקדמה|אחרית דבר|מבוא|chapter|part|book|prologue|epilogue|introduction|kapitel|teil|chapitre|partie|cap[ií]tulo|parte|capitolo|hoofdstuk|rozdzia[lł]|глава|часть|الفصل|الباب|فصل)(?=[\s:.\-–—]|$)/iu; // (\b only knows Latin letters)
   const PAGE_NUMBER = /^[\s\-–—|[\]()]*(page\s*)?([\divxlc]{1,6}|\d+\s*(of|\/)\s*\d+)[\s\-–—|[\]()]*$/i;
 
   function buildBook(doc, options) {
     const o = Object.assign({}, DEFAULTS, options);
     const pages = doc.pages;
-    if (pages.some((p) => p.ocr)) correctOcr(pages, o.ocrCorrect);
+    if (pages.some((p) => p.ocr || p.hiddenTextLayer)) correctOcr(pages, o.ocrCorrect);
+    normalizeOcrSizes(pages);
+    // how often each word occurs in the book (for joining words split at a line end)
+    const wordFreq = new Map();
+    for (const p of pages) {
+      for (const l of p.lines) {
+        for (const t of l.text.split(/\s+/)) {
+          const w = t.replace(/[\u0591-\u05C7]/g, '').replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+          if (w) wordFreq.set(w, (wordFreq.get(w) || 0) + 1);
+        }
+      }
+    }
 
     // ---- body text size (the size most characters use) --------------------------------------------------------
     const sizeChars = new Map();
@@ -141,7 +153,16 @@
         if (i > 0) {
           const prev = runs[runs.length - 1];
           const first = lr[0];
-          if (o.joinHyphens && prev && /\p{L}[-\u2010\u00AD]$/u.test(prev.text) && /^\p{Ll}/u.test(first.text)) {
+          const lastWord = prev ? (prev.text.match(/(\S+)$/) || ['', ''])[1] : '';
+          const startsHebrew = /^[\u05D0-\u05EA]/.test(first.text);
+          if (o.joinHyphens && prev && startsHebrew && /[\u05D0-\u05EA][\u05BE\-\u2010]$/.test(prev.text)) {
+            // Hebrew words joined by a maqaf (בית־הספר) split at the line end: keep the maqaf, no space
+            prev.text = `${prev.text.slice(0, -1)}\u05BE`;
+          } else if (o.joinHyphens && prev && startsHebrew && (pr.lines[i - 1].ocr || pr.lines[i - 1].ocrish) &&
+              /[\u05D0-\u05EA]{2,}ך$/.test(lastWord) && (wordFreq.get(lastWord.slice(0, -1)) || 0) >= 2 && (wordFreq.get(lastWord) || 0) <= 1) {
+            // OCR read a line-end maqaf as ך (מכסה־ -> מכסהך): the word without it is a word of the book
+            prev.text = `${prev.text.slice(0, -1)}\u05BE`;
+          } else if (o.joinHyphens && prev && /\p{L}[-\u2010\u00AD]$/u.test(prev.text) && /^\p{Ll}/u.test(first.text)) {
             prev.text = prev.text.slice(0, -1); // re-join a word the PDF split at the line end
           } else if (prev && !/[\s­]$/.test(prev.text) && !/^\s/.test(first.text)) {
             prev.text += ' ';
@@ -160,6 +181,16 @@
       let level = pr.outlineLevel || 0;
       if (!level && o.detectHeadings && text.length < 220) {
         level = sizeLevel(first.size);
+        // a long line that ends like a sentence is text, however big OCR measured it
+        if (level && text.length > 40 && /[.,;:]["”״']?$/.test(text)) level = 0;
+        // OCR sizes vary ~15% from line to line: an OCR'd line only a little bigger than the text is a heading
+        // only if it also stands on its own as a short line (noise inside a paragraph does not)
+        if (level && first.ocr && first.size < bodySize * 1.3 && !(pr.standalone && pr.lines.length <= 2 && text.length < 90)) level = 0;
+        // a short centred line standing on its own that starts like a chapter title (OCR got its size wrong)
+        if (!level && first.ocr && pr.lines.length === 1 && text.length < 70 && pr.standalone && pr.lines.every(isCentered) &&
+            CHAPTER_WORD.test(text) && !/[.,;]["”״']?$/.test(text)) {
+          level = Math.max(1, outlineDepth + 1);
+        }
         // a short, all-bold line standing on its own, at body size or bigger
         if (!level && pr.lines.length <= 2 && text.length < 90 && first.size >= bodySize - 0.3 &&
             runs.every((r) => r.b || !r.text.trim()) && !/[.,;]$/.test(text) && pr.standalone) {
@@ -207,7 +238,8 @@
         let brk = !para || outlineMarks.has(l) || para.outlineLevel;
         if (!brk) {
           const samePage = para.page === pi && prevLine;
-          const sizeChange = Math.abs(l.size - a.size) > Math.max(0.6, a.size * 0.12);
+          // OCR measures sizes loosely (±15%), so only a clear change counts there
+          const sizeChange = Math.abs(l.size - a.size) > Math.max(0.6, a.size * (l.ocr && a.ocr ? 0.25 : 0.12));
           const styleChange = (a.runs.every((r) => r.b) !== l.runs.every((r) => r.b)) && (l.text.length < 120 || a.text.length < 120);
           const gap = samePage ? (l.base - a.base) / a.size : lineGap;
           const bigGap = samePage && (gap > lineGap * 1.45 || gap < -0.5);
@@ -253,7 +285,9 @@
       } else merged.push(b);
     }
 
-    return splitChapters(merged, doc, o);
+    const book = splitChapters(merged, doc, o);
+    book.headerDiag = drop.diag || null; // what the header/footer detector saw (diagnostic report)
+    return book;
   }
 
   // ---------------------------------------------------------------------------------------------------------
@@ -281,9 +315,11 @@
 
   function findHeadersFooters(pages) {
     const drop = new Set();
+    const why = new Map(); // line -> reason (for the diagnostic report)
     const sizeChars = new Map();
     for (const p of pages) for (const l of p.lines) { const k = Math.round(l.size * 2) / 2; sizeChars.set(k, (sizeChars.get(k) || 0) + l.text.length); }
     const bodySize = sizeChars.size ? [...sizeChars.entries()].sort((a, b) => b[1] - a[1])[0][0] : 11;
+    const isNoise = (l) => (l.text.match(/[\p{L}\p{N}]/gu) || []).length < 2 && !/\d/.test(l.text);
     const cands = [];
     pages.forEach((p, pi) => {
       const ls = [...p.lines].sort((a, b) => a.top - b.top);
@@ -291,45 +327,108 @@
       const add = (l, zone, neighbour) => {
         const gap = neighbour ? (zone === 'top' ? neighbour.top - l.bottom : l.top - neighbour.bottom) : 99;
         cands.push({
-          l, pi, zone, key: headerKey(l.text),
+          l, pi, zone, key: headerKey(l.text).slice(0, 48),
           nums: (l.text.match(/\d{1,4}/g) || []).map(Number),
           short: l.text.length < 90,
           small: l.size <= bodySize * 1.1,
           apart: gap > Math.min(l.size, neighbour ? neighbour.size : l.size) * 0.9,
         });
       };
-      for (let i = 0; i < Math.min(2, ls.length); i++) if (ls[i].top < p.height * 0.14) add(ls[i], 'top', ls[i + 1]);
-      for (let i = ls.length - 1; i >= Math.max(0, ls.length - 2); i--) if (ls[i].bottom > p.height * 0.86) add(ls[i], 'bottom', ls[i - 1]);
+      // rows: lines that share a vertical band (a header is often read as several pieces: number, slash, title)
+      const rows = [];
+      for (const l of ls) {
+        const r = rows[rows.length - 1];
+        if (r && l.top < r.bottom - Math.min(l.bottom - l.top, r.bottom - r.top) * 0.4) { r.lines.push(l); r.bottom = Math.max(r.bottom, l.bottom); } else rows.push({ top: l.top, bottom: l.bottom, lines: [l] });
+      }
+      // specks at the page edges (a mark read as ' or |) are dropped and do not count as a row
+      const edge = (r) => r.top < p.height * 0.18 || r.bottom > p.height * 0.82;
+      const real = rows.filter((r) => {
+        if (edge(r) && r.lines.every(isNoise)) { for (const l of r.lines) { drop.add(l); why.set(l, 'speck at the page edge'); } return false; }
+        return true;
+      });
+      for (let i = 0; i < Math.min(2, real.length); i++) {
+        if (real[i].top < p.height * 0.18) for (const l of real[i].lines) add(l, 'top', real[i + 1] && real[i + 1].lines[0]);
+      }
+      for (let i = real.length - 1; i >= Math.max(0, real.length - 2); i--) {
+        if (real[i].bottom > p.height * 0.82) for (const l of real[i].lines) add(l, 'bottom', real[i - 1] && real[i - 1].lines[0]);
+      }
     });
 
     // page numbers: printed number minus page index is constant across the book
     const offsets = new Map();
     for (const c of cands) for (const n of new Set(c.nums)) { const k = n - (c.pi + 1); offsets.set(k, (offsets.get(k) || 0) + 1); }
     const best = [...offsets.entries()].sort((a, b) => b[1] - a[1])[0];
-    const numbered = best && best[1] >= Math.max(3, pages.length * 0.25) ? best[0] : null;
+    // OCR misreads many page numbers, so a tenth of the pages agreeing is enough evidence
+    const numbered = best && best[1] >= Math.max(3, pages.length * 0.1) ? best[0] : null;
 
-    // fuzzy clusters of header/footer text, per edge
+    // fuzzy clusters of header/footer text, per edge (cheap checks first: exact key, length, shared letter pairs)
     const clusters = [];
+    const exact = new Map();
+    const pairs = (k) => { const set = new Set(); for (let i = 0; i + 1 < k.length; i++) set.add(k.slice(i, i + 2)); return set; };
     for (const c of cands) {
       if (c.key.length < 2) continue;
-      let cl = clusters.find((x) => x.zone === c.zone && similarity(x.key, c.key) >= 0.75);
-      if (!cl) { cl = { zone: c.zone, key: c.key, pages: new Set() }; clusters.push(cl); }
+      let cl = exact.get(`${c.zone}|${c.key}`);
+      if (!cl) {
+        const cp = pairs(c.key);
+        cl = clusters.find((x) => {
+          if (x.zone !== c.zone || Math.abs(x.key.length - c.key.length) > Math.max(2, x.key.length * 0.3)) return false;
+          let shared = 0;
+          for (const pr of cp) if (x.pairs.has(pr)) shared++;
+          if (shared < Math.min(cp.size, x.pairs.size) * 0.4) return false;
+          return similarity(x.key, c.key) >= 0.75;
+        });
+        if (!cl) { cl = { zone: c.zone, key: c.key, pairs: cp, pages: new Set(), sample: c.l.text }; clusters.push(cl); }
+        exact.set(`${c.zone}|${c.key}`, cl);
+      }
       cl.pages.add(c.pi);
       c.cluster = cl;
     }
     const many = Math.max(3, pages.length * 0.25);
     for (const c of cands) {
       const reps = c.cluster ? c.cluster.pages.size : 0;
-      if (PAGE_NUMBER.test(c.l.text) ||
-          (numbered !== null && c.short && c.nums.some((n) => n - (c.pi + 1) === numbered)) ||
-          // the book prints page numbers in its headers/footers, but OCR misread this one's digits
-          (numbered !== null && c.short && c.small && c.apart && c.nums.length > 0) ||
-          (pages.length >= 3 && reps >= many) ||
-          (reps >= 3 && c.short && c.apart)) {
-        drop.add(c.l);
-      }
+      let reason = null;
+      if (PAGE_NUMBER.test(c.l.text)) reason = 'page number';
+      else if (numbered !== null && c.short && c.nums.some((n) => n - (c.pi + 1) === numbered)) reason = 'carries the page number';
+      else if (numbered !== null && c.short && c.small && c.apart && c.nums.length > 0) reason = 'short line with a (misread) page number';
+      else if (pages.length >= 3 && reps >= many) reason = `repeats on ${reps} pages`;
+      else if (reps >= 3 && c.short && c.apart) reason = `repeats on ${reps} pages, apart from the text`;
+      if (reason) { drop.add(c.l); why.set(c.l, reason); }
+      c.reason = reason;
+      c.reps = reps;
     }
+    drop.diag = {
+      numbered, numberedVotes: best ? best[1] : 0, bodySize,
+      clusters: clusters.filter((x) => x.pages.size >= 2).sort((a, b) => b.pages.size - a.pages.size).slice(0, 12)
+        .map((x) => ({ zone: x.zone, pages: x.pages.size, sample: x.sample })),
+      why, cands,
+    };
     return drop;
+  }
+
+
+  // ---------------------------------------------------------------------------------------------------------
+  // OCR measures text size from line heights, which drift from page to page on a poor scan. Scale each OCR'd
+  // page so its body text has the book's body size; real headings stay bigger than the text of their page.
+  function normalizeOcrSizes(pages) {
+    const bodyOf = (lines) => {
+      const m = new Map();
+      for (const l of lines) { const k = Math.round(l.size * 2) / 2; m.set(k, (m.get(k) || 0) + l.text.length); }
+      return m.size ? [...m.entries()].sort((a, b) => b[1] - a[1])[0][0] : 0;
+    };
+    // pages with little text (title pages, chapter openings with a few lines) have no reliable body size
+    const ocrPages = pages.filter((p) => p.ocr && p.lines.length >= 8 && p.lines.reduce((n, l) => n + l.text.length, 0) >= 300);
+    for (const p of pages) for (const l of p.lines) if (l.sizeOriginal !== undefined) l.size = l.sizeOriginal;
+    for (const p of ocrPages) for (const l of p.lines) { if (l.sizeOriginal === undefined) l.sizeOriginal = l.size; l.size = l.sizeOriginal; }
+    if (ocrPages.length < 2) return;
+    const bodies = ocrPages.map((p) => bodyOf(p.lines)).filter(Boolean).sort((a, b) => a - b);
+    const book = bodies[Math.floor(bodies.length / 2)];
+    for (const p of ocrPages) {
+      const pb = bodyOf(p.lines);
+      if (!pb || !book) continue;
+      const f = book / pb;
+      if (Math.abs(f - 1) < 0.02) continue;
+      for (const l of p.lines) l.size = Math.round(l.sizeOriginal * f * 2) / 2;
+    }
   }
 
   // ---------------------------------------------------------------------------------------------------------
@@ -376,11 +475,15 @@
 
   function correctOcr(pages, enabled) {
     const lines = pages.flatMap((p) => p.lines);
+    const fixable = (l) => l.ocr || l.ocrish;
     for (const l of lines) {
-      if (!l.ocr) continue;
+      if (!fixable(l)) continue;
       if (l.ocrOriginal === undefined) l.ocrOriginal = l.text;
-      l.text = l.ocrOriginal; // start from what OCR read, so switching the option off restores it
-      l.runs = [Object.assign({}, l.runs[0], { text: l.text })];
+      if (l.text !== l.ocrOriginal) { // start from what OCR read, so switching the option off restores it
+        l.text = l.ocrOriginal;
+        l.runs = l.runsOriginal || [Object.assign({}, l.runs[0], { text: l.text })];
+      }
+      if (!l.runsOriginal) l.runsOriginal = l.runs;
     }
     if (!enabled) return;
     const keyOf = (w) => { const k = w.replace(NIQQUD, ''); return /[a-z]/i.test(k) && !/[א-ת]/.test(k) ? k.toLowerCase() : k; };
@@ -391,12 +494,12 @@
         const k = keyOf(splitToken(t)[1]);
         if (k.length < 2) return;
         freq.set(k, (freq.get(k) || 0) + 1);
-        if (!l.ocr || (l.wconf && l.wconf[i] >= 92)) trusted.add(k);
+        if (!fixable(l) || (l.wconf && l.wconf[i] >= 92)) trusted.add(k);
       });
     }
     const fixes = new Map();
     for (const l of lines) {
-      if (!l.ocr) continue;
+      if (!fixable(l)) continue;
       const tokens = l.text.split(' ');
       let changed = false;
       tokens.forEach((t, i) => {
@@ -466,6 +569,7 @@
         headings: blocks.filter((b) => b.type === 'h').length,
         images: blocks.filter((b) => b.type === 'img').length,
         scannedPages: doc.pages.filter((p) => p.scanned).length,
+        hiddenTextPages: doc.pages.filter((p) => p.hiddenTextLayer).length,
         ocrPages: doc.pages.filter((p) => p.ocr).length,
         ocrConfidence: (() => {
           const ps = doc.pages.filter((p) => p.ocr && p.ocrConfidence);
