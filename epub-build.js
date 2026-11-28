@@ -113,7 +113,7 @@ code { font-family: monospace; }
         const cls = [];
         if (afterHeading) cls.push('first');
         if (b.centered) cls.push('center');
-        if (b.size && b.size < 0.85) cls.push('small');
+        if (b.size && b.size < (b.ocr ? 0.7 : 0.85)) cls.push('small'); // OCR sizes are loose: only clearly smaller text
         body += `<p${cls.length ? ` class="${cls.join(' ')}"` : ''}${bdir}>${runsToXhtml(b.runs)}</p>\n`;
         afterHeading = false;
       }

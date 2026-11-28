@@ -159,8 +159,8 @@
             // Hebrew words joined by a maqaf (בית־הספר) split at the line end: keep the maqaf, no space
             prev.text = `${prev.text.slice(0, -1)}\u05BE`;
           } else if (o.joinHyphens && prev && startsHebrew && (pr.lines[i - 1].ocr || pr.lines[i - 1].ocrish) &&
-              /[\u05D0-\u05EA]{2,}ך$/.test(lastWord) && (wordFreq.get(lastWord.slice(0, -1)) || 0) >= 2 && (wordFreq.get(lastWord) || 0) <= 1) {
-            // OCR read a line-end maqaf as ך (מכסה־ -> מכסהך): the word without it is a word of the book
+              /[\u05D0-\u05EA]{2,}[ךד7]$/.test(lastWord) && (wordFreq.get(fixFinals(lastWord.slice(0, -1))) || 0) >= 2 && (wordFreq.get(lastWord) || 0) <= 1) {
+            // OCR read a line-end maqaf as ך, ד or 7 (מכסה־ -> מכסהך, גס־ -> גסד): the word without it is a word of the book
             prev.text = `${prev.text.slice(0, -1)}\u05BE`;
           } else if (o.joinHyphens && prev && /\p{L}[-\u2010\u00AD]$/u.test(prev.text) && /^\p{Ll}/u.test(first.text)) {
             prev.text = prev.text.slice(0, -1); // re-join a word the PDF split at the line end
@@ -199,7 +199,7 @@
       }
       const centered = pr.lines.length <= 3 && pr.lines.every(isCentered);
       if (level) return { type: 'h', level, runs: runs.map((r) => Object.assign(r, { b: false })), text, rtl, centered, size: first.size, fromOutline: !!pr.outlineLevel, page: pr.page };
-      return { type: 'p', runs, text, rtl, centered, size: first.size / bodySize, page: pr.page };
+      return { type: 'p', runs, text, rtl, centered, size: first.size / bodySize, page: pr.page, ocr: !!(first.ocr || first.ocrish) };
     }
 
     pages.forEach((p, pi) => {
@@ -436,7 +436,7 @@
   // the correct spelling of a word appears many more times in the same book. A rarely seen word that becomes a
   // much more frequent word of the book by fixing one look-alike letter is corrected. Words that are common in
   // both spellings (אחד/אחר) are left alone, and confident readings need much stronger evidence.
-  const HEB_PAIRS = ['ונ', 'וז', 'וי', 'ור', 'ון', 'בכ', 'דר', 'חת', 'חה', 'הת', 'נג', 'סם', 'ספ', 'טמ', 'עצ', 'כנ'];
+  const HEB_PAIRS = ['ונ', 'וז', 'וי', 'ור', 'ון', 'וד', 'בכ', 'דר', 'חת', 'חה', 'הת', 'נג', 'זנ', 'סם', 'ספ', 'סט', 'טמ', 'עצ', 'כנ'];
   const LAT_PAIRS = [['rn', 'm'], ['cl', 'd'], ['vv', 'w'], ['li', 'h'], ['l', 'i'], ['e', 'c'], ['l', '1'], ['o', '0'], ['u', 'n'], ['h', 'b']];
   const FINAL = { 'כ': 'ך', 'מ': 'ם', 'נ': 'ן', 'פ': 'ף', 'צ': 'ץ' };
   const UNFINAL = { 'ך': 'כ', 'ם': 'מ', 'ן': 'נ', 'ף': 'פ', 'ץ': 'צ' };
@@ -458,8 +458,6 @@
         for (const r of HEB_SWAP.get(base[i]) || []) out.add(fixFinals(base.slice(0, i) + r + base.slice(i + 1)));
       }
       // a quote mark read as extra י/ו in front of a word (״ -> יי), or a doubled letter (הווא)
-      if (/^[יו]/.test(base) && base.length > 3) out.add(fixFinals(base.slice(1)));
-      if (/^[יו]{2}/.test(base) && base.length > 4) out.add(fixFinals(base.slice(2)));
       for (let i = 0; i + 1 < base.length; i++) if (base[i] === base[i + 1]) out.add(fixFinals(base.slice(0, i) + base.slice(i + 1)));
     } else if (/^[a-z0-9]+$/i.test(w)) {
       const lw = w.toLowerCase();
@@ -498,6 +496,17 @@
       });
     }
     const fixes = new Map();
+    // words of the book with one letter removed -> the words (to find a word OCR dropped a letter from)
+    const byDeletion = new Map();
+    for (const [w, c] of freq) {
+      if (c < 8 || w.length < 4 || !/[\u05D0-\u05EA]/.test(w)) continue;
+      for (let j = 0; j < w.length; j++) {
+        const d = fixFinals(w.slice(0, j) + w.slice(j + 1));
+        if (!byDeletion.has(d)) byDeletion.set(d, new Set());
+        byDeletion.get(d).add(w);
+      }
+    }
+    const insertions = (w) => byDeletion.get(w) || [];
     for (const l of lines) {
       if (!fixable(l)) continue;
       const tokens = l.text.split(' ');
@@ -506,15 +515,28 @@
         const [pre, word, post] = splitToken(t);
         const k = keyOf(word);
         if (k.length < 2 || trusted.has(k)) return;
+        // a line's last word ending in ך/ד/7 may be a maqaf OCR misread: leave it to the line-end join
+        if (i === tokens.length - 1 && /[\u05D0-\u05EA]{2,}[ךד7]$/.test(k) && (freq.get(fixFinals(k.slice(0, -1))) || 0) >= 2) return;
         const fk = freq.get(k) || 0;
         const conf = l.wconf && l.wconf[i] !== undefined ? l.wconf[i] : 70;
         let fix = fixes.get(k);
         if (fix === undefined) {
           fix = null;
-          let bestCount = 0;
-          for (const v of variants(k)) { const c = freq.get(v) || 0; if (c > bestCount) { bestCount = c; fix = v; } }
-          if (!(bestCount >= 3 && bestCount >= 5 * fk)) fix = null;
-          else fix = { to: fix, count: bestCount };
+          // near: one look-alike letter; far: two look-alike letters, or one letter missing / extra
+          let best = null;
+          const consider = (v, far) => {
+            const c = freq.get(v) || 0;
+            const ok = far ? c >= 8 && c >= 10 * fk && k.length >= 4 : c >= 3 && c >= 5 * fk;
+            if (ok && (!best || c > best.count)) best = { to: v, count: c };
+          };
+          const near = variants(k);
+          for (const v of near) consider(v, false);
+          if (!best && /[\u05D0-\u05EA]/.test(k)) {
+            if (k.length >= 5) for (const v1 of near) for (const v2 of variants(v1)) if (v2 !== k) consider(v2, true);
+            if (k.length >= 5) for (let j = 0; j < k.length; j++) consider(fixFinals(k.slice(0, j) + k.slice(j + 1)), true);
+            for (const v of insertions(k)) consider(v, true);
+          }
+          fix = best;
           fixes.set(k, fix);
         }
         if (fix && (conf < 90 || fix.count >= 20 * fk)) {
@@ -524,11 +546,44 @@
           changed = true;
         }
       });
+      if (repairPunctuation(tokens, freq, keyOf)) changed = true;
       if (changed) {
-        l.text = tokens.join(' ');
+        l.text = tokens.join(' ').replace(/\s+/g, ' ').trim();
         l.runs = [Object.assign({}, l.runs[0], { text: l.text })];
       }
     }
+  }
+
+  // Punctuation that OCR reads as Hebrew letters or digits (checked against the book's own words):
+  //  - a maqaf inside a word read as a quote mark: גמדון"בית -> גמדון־בית (an abbreviation like צה"ל has one
+  //    letter after the mark and is left alone)
+  //  - an opening quote mark read as י or יי: יילא -> "לא
+  //  - a question mark read as 3, 7 or ז standing after a word: אתה 3" -> אתה?"
+  function repairPunctuation(tokens, freq, keyOf) {
+    const f = (w) => freq.get(keyOf(w)) || 0;
+    let changed = false;
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+      let m = t.match(/^([^\u05D0-\u05EA]*)([\u05D0-\u05EA]{2,})["״”']([\u05D0-\u05EA]{2,})([^\u05D0-\u05EA]*)$/);
+      if (m && f(m[2]) >= 2 && f(m[3]) >= 2 && f(m[2] + m[3]) === 0) {
+        tokens[i] = `${m[1]}${m[2]}\u05BE${m[3]}${m[4]}`;
+        changed = true;
+        continue;
+      }
+      m = t.match(/^(י{1,2})([\u05D0-\u05EA]{2,})([^\u05D0-\u05EA]*)$/);
+      if (m && f(m[1] + m[2]) <= 1 && f(m[2]) >= 5 && f(m[2]) >= 5 * f(m[1] + m[2])) {
+        tokens[i] = `"${m[2]}${m[3]}`;
+        changed = true;
+        continue;
+      }
+      m = t.match(/^[37ז](["״”']?[.,]?)$/);
+      if (m && i > 0 && /[\u05D0-\u05EA]$/.test(tokens[i - 1]) && (m[1] || i === tokens.length - 1)) {
+        tokens[i - 1] += `?${m[1]}`;
+        tokens[i] = '';
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   function splitChapters(blocks, doc, o) {

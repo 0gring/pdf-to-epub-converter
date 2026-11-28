@@ -8,7 +8,7 @@
   const R = window.EpubReader;
   const MM = R.MM;
   const STORE_KEY = 'pdf-to-epub-settings';
-  const VERSION = '2026-11-27b'; // shown in the panel, so it is clear which version ran
+  const VERSION = '2026-11-28'; // shown in the panel, so it is clear which version ran
 
   let extracted = null; // raw lines/pictures from the PDF (kept so conversion options re-run instantly)
   let structured = null; // book structure for the EPUB
